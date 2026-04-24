@@ -33,6 +33,7 @@ dev = [
     "pyright",
     "pytest",
     "ruff",
+    "tox",
 ]
 
 [tool.coverage.run]
