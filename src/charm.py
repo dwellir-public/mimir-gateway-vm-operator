@@ -20,7 +20,6 @@ from config_builder import (
     render_systemd_unit,
 )
 from remote_write import RemoteWriteProvider
-from tenancy import TenantIdentity, resolve_tenant_identity, tenant_path_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +29,6 @@ class BackendState:
     """Normalized backend relation data."""
 
     urls: list[str]
-
-
-@dataclass(frozen=True)
-class RelationTenantContext:
-    """Operational metadata for one relation-scoped tenant route."""
-
-    tenant: TenantIdentity
-    remote_app_name: str
-    remote_model_uuid: str
-    route_name: str
-    route_file: str
 
 
 class MimirGatewayVmCharm(ops.CharmBase):
@@ -69,8 +57,8 @@ class MimirGatewayVmCharm(ops.CharmBase):
         framework.observe(self.on.grafana_source_relation_departed, self._on_relation_event)
         framework.observe(self.on.grafana_source_relation_broken, self._on_relation_event)
         framework.observe(
-            self.on.show_relation_tenants_action,
-            self._on_show_relation_tenants_action,
+            self.on.show_gateway_routes_action,
+            self._on_show_gateway_routes_action,
         )
 
     def _on_install(self, event: ops.InstallEvent) -> None:
@@ -135,62 +123,30 @@ class MimirGatewayVmCharm(ops.CharmBase):
     def _remote_write_relations(self) -> list[ops.Relation]:
         return list(self.model.relations.get("receive-remote-write", []))
 
-    def _relation_tenant_context(self, relation: ops.Relation) -> RelationTenantContext:
-        relation_app_data = dict(relation.data[relation.app]) if relation.app else {}
-        remote_app_name = relation.app.name if relation.app else ""
-        remote_model_uuid = str(relation_app_data.get("model_uuid", "") or "").strip()
-        if not remote_model_uuid:
-            remote_model_uuid = str(getattr(relation, "remote_model_uuid", "") or "").strip()
-        route_name = f"relation-{relation.id}"
-        return RelationTenantContext(
-            tenant=resolve_tenant_identity(
-                relation_app_data=relation_app_data,
-                remote_app_name=remote_app_name,
-                remote_model_uuid=remote_model_uuid,
-            ),
-            remote_app_name=remote_app_name,
-            remote_model_uuid=remote_model_uuid,
-            route_name=route_name,
-            route_file=f"{route_name}.yml",
-        )
-
-    def _relation_tenant_id(self, relation: ops.Relation) -> str:
-        return self._relation_tenant_context(relation).tenant.tenant_id
-
-    def _relation_tenant_source(self, relation: ops.Relation) -> str:
-        return self._relation_tenant_context(relation).tenant.source
-
     def _relation_route_name(self, relation: ops.Relation) -> str:
-        return self._relation_tenant_context(relation).route_name
+        return f"relation-{relation.id}"
 
     def _relation_route_file(self, relation: ops.Relation) -> str:
-        return self._relation_tenant_context(relation).route_file
-
-    def _relation_remote_model_uuid(self, relation: ops.Relation) -> str:
-        return self._relation_tenant_context(relation).remote_model_uuid
-
-    def _relation_path_prefix(self, relation: ops.Relation) -> str:
-        return tenant_path_prefix(tenant_id=self._relation_tenant_id(relation))
+        return f"{self._relation_route_name(relation)}.yml"
 
     def _relation_write_url(self, relation: ops.Relation) -> str:
-        return f"{self._external_url_base()}{self._relation_path_prefix(relation)}/api/v1/push"
+        return f"{self._external_url_base()}/api/v1/push"
 
     def _relation_query_url(self, relation: ops.Relation) -> str:
-        return f"{self._external_url_base()}{self._relation_path_prefix(relation)}/prometheus"
+        return f"{self._external_url_base()}/prometheus"
 
-    def _on_show_relation_tenants_action(self, event: ops.ActionEvent) -> None:
+    def _on_show_gateway_routes_action(self, event: ops.ActionEvent) -> None:
+        backend_urls = self._backend_state().urls if self._backend_state() is not None else []
         mappings = []
         for relation in self._remote_write_relations():
             remote_app_name = relation.app.name if relation.app else ""
             mappings.append(
                 {
+                    "backend-urls": backend_urls,
                     "relation-id": relation.id,
                     "remote-app": remote_app_name,
-                    "remote-model-uuid": self._relation_remote_model_uuid(relation),
                     "route-file": self._relation_route_file(relation),
                     "route-name": self._relation_route_name(relation),
-                    "tenant-id": self._relation_tenant_id(relation),
-                    "tenant-source": self._relation_tenant_source(relation),
                     "write-url": self._relation_write_url(relation),
                     "query-url": self._relation_query_url(relation),
                 }
@@ -233,11 +189,9 @@ class MimirGatewayVmCharm(ops.CharmBase):
     def _render_relation_dynamic_configs(self, backend_urls: list[str]) -> dict[str, str]:
         rendered: dict[str, str] = {}
         for relation in self._remote_write_relations():
-            tenant_id = self._relation_tenant_id(relation)
             filename = self._relation_route_file(relation)
             rendered[filename] = render_dynamic_config(
                 route_name=self._relation_route_name(relation),
-                tenant_id=tenant_id,
                 backend_urls=backend_urls,
             )
         return rendered
@@ -248,10 +202,7 @@ class MimirGatewayVmCharm(ops.CharmBase):
             for relation in self._remote_write_relations()
         }
         self.remote_write_provider.publish(relation_urls=relation_urls)
-        query_url = None
-        if len(relation_urls) == 1:
-            relation = self._remote_write_relations()[0]
-            query_url = self._relation_query_url(relation)
+        query_url = self._relation_query_url(self._remote_write_relations()[0]) if relation_urls else None
         for relation in self.model.relations.get("grafana-source", []):
             if query_url is None:
                 relation.data[self.unit].pop("grafana_source_host", None)
@@ -277,7 +228,7 @@ class MimirGatewayVmCharm(ops.CharmBase):
         self.unit.status = ops.ActiveStatus(
             "gateway ready: "
             f"{backend_count} active {self._pluralize('backend', backend_count)}, "
-            f"{tenant_count} {self._pluralize('tenant', tenant_count)} served"
+            f"{tenant_count} {self._pluralize('consumer', tenant_count)} served"
         )
 
     def _pluralize(self, noun: str, count: int) -> str:

@@ -1,2 +1,2 @@
-show-relation-tenants:
-  description: Show relation-scoped tenant mapping and published frontend URLs.
+show-gateway-routes:
+  description: Show shared frontend URLs, relation-scoped route files, and backend URLs.

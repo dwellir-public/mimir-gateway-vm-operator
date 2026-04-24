@@ -5,8 +5,6 @@ from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlparse
 
-from tenancy import tenant_path_prefix, validate_tenant_id
-
 TRAEFIK_CONFIG_DIR = Path("/etc/traefik")
 TRAEFIK_DYNAMIC_DIR = TRAEFIK_CONFIG_DIR / "dynamic"
 TRAEFIK_STATIC_CONFIG_PATH = TRAEFIK_CONFIG_DIR / "traefik.yml"
@@ -43,13 +41,6 @@ def _validate_route_name(route_name: str) -> str:
     return route_name
 
 
-def _validated_tenant_id(tenant_id: str) -> str:
-    try:
-        return validate_tenant_id(tenant_id)
-    except ValueError as exc:
-        raise ValueError("tenant_id must be a valid tenant identifier") from exc
-
-
 def _validate_backend_urls(backend_urls: list[str]) -> list[str]:
     if not backend_urls:
         raise ValueError("backend_urls must not be empty")
@@ -82,43 +73,28 @@ def _validate_backend_urls(backend_urls: list[str]) -> list[str]:
     return validated_urls
 
 
-def _tenant_router_rule(*, path_prefix: str) -> str:
-    """Match only the exact tenant root or paths beneath that tenant segment."""
-    return f"Path(`{path_prefix}`) || PathPrefix(`{path_prefix}/`)"
-
-
 def render_dynamic_config(
     *,
     route_name: str,
-    tenant_id: str,
     backend_urls: list[str],
 ) -> str:
     """Render one relation-scoped dynamic Traefik route."""
     route_name = _validate_route_name(route_name)
-    tenant_id = _validated_tenant_id(tenant_id)
-    path_prefix = tenant_path_prefix(tenant_id=tenant_id)
     backend_urls = _validate_backend_urls(backend_urls)
 
     lines = [
         "http:",
         "  routers:",
-        f"    {route_name}:",
+        f"    {route_name}-push:",
         "      entryPoints:",
         "        - web",
-        f'      rule: "{_tenant_router_rule(path_prefix=path_prefix)}"',
+        '      rule: "PathPrefix(`/api/v1/push`)"',
         f"      service: {route_name}",
-        f"      middlewares: [{route_name}-strip, {route_name}-tenant]",
-        "",
-        "  middlewares:",
-        f"    {route_name}-strip:",
-        "      stripPrefix:",
-        "        prefixes:",
-        f'          - "{path_prefix}"',
-        "",
-        f"    {route_name}-tenant:",
-        "      headers:",
-        "        customRequestHeaders:",
-        f'          X-Scope-OrgID: "{tenant_id}"',
+        f"    {route_name}-query:",
+        "      entryPoints:",
+        "        - web",
+        '      rule: "PathPrefix(`/prometheus`)"',
+        f"      service: {route_name}",
         "",
         "  services:",
         f"    {route_name}:",

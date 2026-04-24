@@ -1,46 +1,34 @@
 # Mimir Gateway VM Operator
 
 `mimir-gateway-vm` is a Traefik-based machine charm that fronts `mimir-vm`
-with relation-scoped multitenancy. It exposes a Prometheus remote-write entry
-point and a Grafana datasource/query endpoint while injecting
-`X-Scope-OrgID` per consumer relation.
+as a stable shared ingress and load balancer. It exposes one shared
+Prometheus remote-write entry point and one shared Grafana datasource/query
+endpoint for a single-tenant Mimir deployment.
 
-## Tenant Routing Contract
+## Operating Model
 
-Tenant identity is chosen in this order:
+This charm is not a tenant router.
 
-- explicit `tenant-id` from the related application databag
-- derived `<app-name>-<short-model-uuid>` when a remote model UUID is available
-- derived `<app-name>` for same-model relations
+The supported architecture is:
 
-Examples:
+- one shared single-tenant Mimir deployment
+- one shared write URL: `/api/v1/push`
+- one shared query URL: `/prometheus`
+- label-based partitioning inside Mimir rather than per-tenant routing
 
-- same-model relation: `alloy-vm`
-- cross-model relation: `alloy-vm-f794060e`
+`mimir-gateway-vm` keeps a stable HTTP ingress in front of one or more Mimir
+backends and load-balances requests across those backend URLs. It does not
+derive tenant ids, inject `X-Scope-OrgID`, or publish tenant-specific paths.
 
-The gateway publishes a tenant-specific write URL on the existing
-`prometheus_remote_write` relation:
+For operational inspection, `show-gateway-routes` reports:
 
-- write URL: `/tenants/<tenant-id>/api/v1/push`
-
-The tenant-specific query URL:
-
-- query URL: `/tenants/<tenant-id>/prometheus`
-
-is reported by the `show-relation-tenants` action and is published on the
-`grafana-source` relation only when exactly one tenant is currently served.
-
-For operational inspection, `show-relation-tenants` also reports:
-
-- `tenant-source`: `explicit` or `derived`
 - `remote-app`
-- `remote-model-uuid`
 - `relation-id`
 - `route-name`
 - `route-file`
-
-Each tenant gets its own Traefik route and the gateway strips the
-`/tenants/<tenant-id>` prefix before forwarding the request upstream.
+- `backend-urls`
+- `write-url`
+- `query-url`
 
 ## Integrations
 
@@ -79,5 +67,5 @@ charmcraft pack
 juju deploy ./mimir-gateway-vm_amd64.charm mimir-gateway-vm
 juju integrate mimir-gateway-vm:backend mimir-vm:<backend-endpoint>
 juju integrate alloy-vm:send-remote-write mimir-gateway-vm:receive-remote-write
-juju run mimir-gateway-vm/leader show-relation-tenants
+juju run mimir-gateway-vm/leader show-gateway-routes
 ```

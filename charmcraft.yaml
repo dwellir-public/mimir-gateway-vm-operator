@@ -1,11 +1,11 @@
 type: charm
 name: mimir-gateway-vm
 title: Mimir Gateway VM
-summary: Traefik-based multi-tenant gateway for Grafana Mimir on Ubuntu.
+summary: Traefik-based shared ingress for Grafana Mimir on Ubuntu.
 description: |
   Traefik-based machine charm that fronts a Mimir backend, publishes
-  remote-write and Grafana datasource endpoints, and injects tenant headers
-  for relation-scoped multitenancy.
+  remote-write and Grafana datasource endpoints, and load-balances shared
+  single-tenant traffic to one or more Mimir backends.
 
 base: ubuntu@24.04
 platforms:

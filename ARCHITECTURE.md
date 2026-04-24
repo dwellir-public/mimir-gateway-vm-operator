@@ -4,8 +4,8 @@
 
 `mimir-gateway-vm` is a Traefik-based machine charm that fronts `mimir-vm`.
 The charm owns exactly one workload: a Traefik service managed through a
-systemd unit. It publishes tenant-scoped remote-write and Grafana datasource
-entry points and injects `X-Scope-OrgID` toward the backend.
+systemd unit. It publishes shared remote-write and Grafana datasource entry
+points and load-balances requests toward the Mimir backend pool.
 
 ## Workload Boundary
 
@@ -22,13 +22,16 @@ Juju-independent helper modules so they can be unit tested directly.
 ## Integrations
 
 - `backend`: supplies one or more Mimir backend URLs
-- `receive-remote-write`: receives per-relation write consumers
-- `grafana-source`: publishes the gateway query endpoint
+- `receive-remote-write`: receives write consumers and publishes the shared ingress URL
+- `grafana-source`: publishes the shared gateway query endpoint
 
 ## Configuration Flow
 
 The operator may set `external-url`, `traefik-port`, and `log-level`. The charm
 renders static Traefik configuration plus relation-scoped dynamic route files.
+Each route file publishes the same shared `/api/v1/push` and `/prometheus`
+paths, but relation-scoped files keep ownership and pruning simple as consumer
+relations are added or removed.
 
 ## Upgrade And Recovery
 

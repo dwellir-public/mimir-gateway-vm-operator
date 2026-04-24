@@ -24,13 +24,13 @@ def _gateway_is_waiting_for_backend(status: jubilant.Status) -> bool:
     )
 
 
-def test_gateway_action_reports_tenant_specific_mapping(
+def test_gateway_action_reports_shared_mapping(
     charm: pathlib.Path,
     mimir_charm: pathlib.Path,
     alloy_charm: pathlib.Path,
     juju: jubilant.Juju,
 ):
-    """Deploy the gateway and assert the mapping action reports tenant-specific URLs."""
+    """Deploy the gateway and assert the mapping action reports shared URLs."""
     juju.deploy(mimir_charm.resolve(), app="mimir-vm")
     juju.deploy(charm.resolve(), app="mimir-gateway-vm")
     juju.wait(lambda status: _gateway_is_waiting_for_backend(status), timeout=1200)
@@ -51,7 +51,7 @@ def test_gateway_action_reports_tenant_specific_mapping(
 
     result = juju.run(
         "mimir-gateway-vm/0",
-        "show-relation-tenants",
+        "show-gateway-routes",
         wait=300,
     )
     result.raise_on_failure()
@@ -59,10 +59,8 @@ def test_gateway_action_reports_tenant_specific_mapping(
     mappings = json.loads(result.results["mappings"])
     assert len(mappings) == 1
     assert mappings[0]["remote-app"] == "alloy-vm"
-    assert mappings[0]["remote-model-uuid"] == ""
+    assert mappings[0]["backend-urls"] == ["http://10.0.0.10:9009"]
     assert mappings[0]["route-file"] == f"relation-{mappings[0]['relation-id']}.yml"
     assert mappings[0]["route-name"] == f"relation-{mappings[0]['relation-id']}"
-    assert mappings[0]["tenant-id"] == "alloy-vm"
-    assert mappings[0]["tenant-source"] == "derived"
-    assert mappings[0]["write-url"].endswith("/tenants/alloy-vm/api/v1/push")
-    assert mappings[0]["query-url"].endswith("/tenants/alloy-vm/prometheus")
+    assert mappings[0]["write-url"].endswith("/api/v1/push")
+    assert mappings[0]["query-url"].endswith("/prometheus")
