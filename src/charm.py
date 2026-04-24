@@ -136,7 +136,8 @@ class MimirGatewayVmCharm(ops.CharmBase):
         return f"{self._external_url_base()}/prometheus"
 
     def _on_show_gateway_routes_action(self, event: ops.ActionEvent) -> None:
-        backend_urls = self._backend_state().urls if self._backend_state() is not None else []
+        backend_state = self._backend_state()
+        backend_urls = backend_state.urls if backend_state is not None else []
         mappings = []
         for relation in self._remote_write_relations():
             remote_app_name = relation.app.name if relation.app else ""
