@@ -1,0 +1,2 @@
+show-relation-tenants:
+  description: Show relation-scoped tenant mapping and published frontend URLs.

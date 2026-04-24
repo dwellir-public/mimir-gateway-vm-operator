@@ -1,0 +1,48 @@
+type: charm
+name: mimir-gateway-vm
+title: Mimir Gateway VM
+summary: Traefik-based multi-tenant gateway for Grafana Mimir on Ubuntu.
+description: |
+  Traefik-based machine charm that fronts a Mimir backend, publishes
+  remote-write and Grafana datasource endpoints, and injects tenant headers
+  for relation-scoped multitenancy.
+
+base: ubuntu@24.04
+platforms:
+  amd64:
+
+parts:
+  charm:
+    plugin: uv
+    source: .
+    build-snaps:
+      - astral-uv
+
+provides:
+  receive-remote-write:
+    interface: prometheus_remote_write
+    optional: true
+  grafana-source:
+    interface: grafana_datasource
+    optional: true
+
+requires:
+  backend:
+    interface: mimir_gateway_backend
+    optional: false
+
+config:
+  options:
+    external-url:
+      description: Optional externally reachable base URL for the gateway.
+      default: ""
+      type: string
+    traefik-port:
+      description: Port exposed by Traefik for write and query traffic.
+      default: 80
+      type: int
+    log-level:
+      description: |
+        Traefik log level.
+      default: "info"
+      type: string
