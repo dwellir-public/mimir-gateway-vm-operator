@@ -99,6 +99,36 @@ def test_remote_write_relation_publishes_shared_gateway_url(monkeypatch):
     assert relation_out.local_unit_data["remote_write"] == '{"url": "http://10.0.0.20:80/api/v1/push"}'
 
 
+def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
+    ctx = _context()
+
+    monkeypatch.setattr(
+        "charm.MimirGatewayVmCharm._external_url_base",
+        lambda _self: "http://10.0.0.20:80",
+    )
+    monkeypatch.setattr("charm.MimirGatewayVmCharm._configure", lambda _self, _urls: True)
+    monkeypatch.setattr("charm.traefik.start", lambda: None)
+    monkeypatch.setattr("charm.traefik.get_version", lambda: None)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+
+    backend = _backend_relation()
+    relation = Relation(
+        "receive-remote-write",
+        interface="prometheus_remote_write",
+        remote_app_name="alloy",
+        local_app_data={
+            "tenant-id": "legacy-tenant",
+            "application": "legacy-app",
+            "model": "legacy-model",
+            "model_uuid": "legacy-uuid",
+        },
+    )
+    state = ctx.run(ctx.on.start(), testing.State(relations=[backend, relation], leader=True))
+    relation_out = state.get_relation(relation.id)
+    assert relation_out.local_app_data == {}
+    assert relation_out.local_unit_data["remote_write"] == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+
+
 def test_remote_write_relations_publish_same_shared_gateway_url(monkeypatch):
     ctx = _context()
 
