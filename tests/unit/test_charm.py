@@ -73,8 +73,8 @@ def test_start_renders_shared_dynamic_configs(monkeypatch):
     )
     assert calls == []
     assert len(written) == 2
-    assert all('PathPrefix(`/api/v1/push`)' in content for content in written.values())
-    assert all('PathPrefix(`/prometheus`)' in content for content in written.values())
+    assert all("PathPrefix(`/api/v1/push`)" in content for content in written.values())
+    assert all("PathPrefix(`/prometheus`)" in content for content in written.values())
     assert all("X-Scope-OrgID" not in content for content in written.values())
     assert all("/tenants/" not in content for content in written.values())
     assert state.unit_status.name == "active"
@@ -96,7 +96,10 @@ def test_remote_write_relation_publishes_shared_gateway_url(monkeypatch):
     relation = _remote_write_relation()
     state = ctx.run(ctx.on.start(), testing.State(relations=[backend, relation], leader=True))
     relation_out = state.get_relation(relation.id)
-    assert relation_out.local_unit_data["remote_write"] == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    assert (
+        relation_out.local_unit_data["remote_write"]
+        == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    )
 
 
 def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
@@ -126,7 +129,10 @@ def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
     state = ctx.run(ctx.on.start(), testing.State(relations=[backend, relation], leader=True))
     relation_out = state.get_relation(relation.id)
     assert relation_out.local_app_data == {}
-    assert relation_out.local_unit_data["remote_write"] == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    assert (
+        relation_out.local_unit_data["remote_write"]
+        == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    )
 
 
 def test_remote_write_relations_publish_same_shared_gateway_url(monkeypatch):
@@ -156,8 +162,14 @@ def test_remote_write_relations_publish_same_shared_gateway_url(monkeypatch):
 
     relation_one_out = state.get_relation(relation_one.id)
     relation_two_out = state.get_relation(relation_two.id)
-    assert relation_one_out.local_unit_data["remote_write"] == '{"url": "http://10.0.0.20:80/api/v1/push"}'
-    assert relation_two_out.local_unit_data["remote_write"] == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    assert (
+        relation_one_out.local_unit_data["remote_write"]
+        == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    )
+    assert (
+        relation_two_out.local_unit_data["remote_write"]
+        == '{"url": "http://10.0.0.20:80/api/v1/push"}'
+    )
 
 
 def test_grafana_source_relation_publishes_prometheus_url(monkeypatch):
@@ -182,10 +194,7 @@ def test_grafana_source_relation_publishes_prometheus_url(monkeypatch):
         testing.State(relations=[backend, grafana, relation], leader=True),
     )
     relation_out = state.get_relation(grafana.id)
-    assert (
-        relation_out.local_unit_data["grafana_source_host"]
-        == "http://10.0.0.20:80/prometheus"
-    )
+    assert relation_out.local_unit_data["grafana_source_host"] == "http://10.0.0.20:80/prometheus"
 
 
 def test_grafana_source_relation_keeps_shared_url_when_multiple_consumers_exist(monkeypatch):
@@ -244,12 +253,12 @@ def test_configure_writes_distinct_dynamic_file_per_relation(monkeypatch, tmp_pa
     )
     ctx.run(ctx.on.start(), testing.State(relations=[backend, rel1, rel2]))
     assert set(written) == {f"relation-{rel1.id}.yml", f"relation-{rel2.id}.yml"}
-    assert 'PathPrefix(`/api/v1/push`)' in written[f"relation-{rel1.id}.yml"]
-    assert 'PathPrefix(`/prometheus`)' in written[f"relation-{rel1.id}.yml"]
+    assert "PathPrefix(`/api/v1/push`)" in written[f"relation-{rel1.id}.yml"]
+    assert "PathPrefix(`/prometheus`)" in written[f"relation-{rel1.id}.yml"]
     assert "X-Scope-OrgID" not in written[f"relation-{rel1.id}.yml"]
     assert "/tenants/" not in written[f"relation-{rel1.id}.yml"]
-    assert 'PathPrefix(`/api/v1/push`)' in written[f"relation-{rel2.id}.yml"]
-    assert 'PathPrefix(`/prometheus`)' in written[f"relation-{rel2.id}.yml"]
+    assert "PathPrefix(`/api/v1/push`)" in written[f"relation-{rel2.id}.yml"]
+    assert "PathPrefix(`/prometheus`)" in written[f"relation-{rel2.id}.yml"]
     assert "X-Scope-OrgID" not in written[f"relation-{rel2.id}.yml"]
     assert "/tenants/" not in written[f"relation-{rel2.id}.yml"]
 
@@ -446,3 +455,73 @@ def test_config_changed_starts_inactive_traefik_even_without_file_changes(monkey
     state = ctx.run(ctx.on.config_changed(), testing.State(relations=[backend]))
     assert calls == ["start"]
     assert state.unit_status.name == "waiting"
+
+
+def test_config_changed_does_not_restart_active_traefik_for_dynamic_config_updates(monkeypatch):
+    ctx = _context()
+    backend = _backend_relation()
+    relation = _remote_write_relation()
+    calls = []
+
+    monkeypatch.setattr("charm.traefik.ensure_directories", lambda: None)
+    monkeypatch.setattr("charm.traefik.write_static_config", lambda _content: False)
+    monkeypatch.setattr("charm.traefik.write_systemd_unit", lambda _content: False)
+    monkeypatch.setattr("charm.traefik.prune_dynamic_configs", lambda keep: False)
+    monkeypatch.setattr("charm.traefik.write_dynamic_config", lambda _filename, _content: True)
+    monkeypatch.setattr("charm.traefik.daemon_reload", lambda: calls.append("daemon-reload"))
+    monkeypatch.setattr("charm.traefik.enable", lambda: calls.append("enable"))
+    monkeypatch.setattr("charm.traefik.start", lambda: calls.append("start"))
+    monkeypatch.setattr("charm.traefik.restart", lambda: calls.append("restart"))
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    monkeypatch.setattr("charm.traefik.get_version", lambda: None)
+
+    state = ctx.run(
+        ctx.on.config_changed(),
+        testing.State(relations=[backend, relation], leader=True),
+    )
+    assert calls == []
+    assert state.unit_status.name == "active"
+
+
+def test_config_changed_does_not_restart_active_traefik_for_dynamic_config_prune(monkeypatch):
+    ctx = _context()
+    backend = _backend_relation()
+    calls = []
+
+    monkeypatch.setattr("charm.traefik.ensure_directories", lambda: None)
+    monkeypatch.setattr("charm.traefik.write_static_config", lambda _content: False)
+    monkeypatch.setattr("charm.traefik.write_systemd_unit", lambda _content: False)
+    monkeypatch.setattr("charm.traefik.prune_dynamic_configs", lambda keep: True)
+    monkeypatch.setattr("charm.traefik.write_dynamic_config", lambda _filename, _content: False)
+    monkeypatch.setattr("charm.traefik.daemon_reload", lambda: calls.append("daemon-reload"))
+    monkeypatch.setattr("charm.traefik.enable", lambda: calls.append("enable"))
+    monkeypatch.setattr("charm.traefik.start", lambda: calls.append("start"))
+    monkeypatch.setattr("charm.traefik.restart", lambda: calls.append("restart"))
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    monkeypatch.setattr("charm.traefik.get_version", lambda: None)
+
+    state = ctx.run(ctx.on.config_changed(), testing.State(relations=[backend]))
+    assert calls == []
+    assert state.unit_status.name == "active"
+
+
+def test_config_changed_restarts_active_traefik_for_static_config_updates(monkeypatch):
+    ctx = _context()
+    backend = _backend_relation()
+    calls = []
+
+    monkeypatch.setattr("charm.traefik.ensure_directories", lambda: None)
+    monkeypatch.setattr("charm.traefik.write_static_config", lambda _content: True)
+    monkeypatch.setattr("charm.traefik.write_systemd_unit", lambda _content: False)
+    monkeypatch.setattr("charm.traefik.prune_dynamic_configs", lambda keep: False)
+    monkeypatch.setattr("charm.traefik.write_dynamic_config", lambda _filename, _content: False)
+    monkeypatch.setattr("charm.traefik.daemon_reload", lambda: calls.append("daemon-reload"))
+    monkeypatch.setattr("charm.traefik.enable", lambda: calls.append("enable"))
+    monkeypatch.setattr("charm.traefik.start", lambda: calls.append("start"))
+    monkeypatch.setattr("charm.traefik.restart", lambda: calls.append("restart"))
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    monkeypatch.setattr("charm.traefik.get_version", lambda: None)
+
+    state = ctx.run(ctx.on.config_changed(), testing.State(relations=[backend]))
+    assert calls == ["restart"]
+    assert state.unit_status.name == "active"

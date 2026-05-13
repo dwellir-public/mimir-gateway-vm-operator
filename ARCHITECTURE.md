@@ -31,7 +31,10 @@ The operator may set `external-url`, `traefik-port`, and `log-level`. The charm
 renders static Traefik configuration plus relation-scoped dynamic route files.
 Each route file publishes the same shared `/api/v1/push` and `/prometheus`
 paths, but relation-scoped files keep ownership and pruning simple as consumer
-relations are added or removed.
+relations are added or removed. Dynamic route files rely on Traefik's file
+provider watch support for in-place reloads, so consumer relation churn does
+not require restarting the Traefik service. Only static config or systemd unit
+changes trigger a service restart.
 
 ## Upgrade And Recovery
 

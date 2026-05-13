@@ -157,12 +157,13 @@ class MimirGatewayVmCharm(ops.CharmBase):
         )
 
     def _configure(self, backend_urls: list[str]) -> bool:
+        """Render Traefik config and only restart for non-hot-reloadable changes."""
         try:
             traefik.ensure_directories()
             static_changed = traefik.write_static_config(render_static_config(entrypoint_port=80))
             unit_changed = traefik.write_systemd_unit(render_systemd_unit())
             rendered = self._render_relation_dynamic_configs(backend_urls)
-            dynamic_pruned = traefik.prune_dynamic_configs(keep=set(rendered))
+            traefik.prune_dynamic_configs(keep=set(rendered))
             dynamic_changed = False
             for filename, content in rendered.items():
                 dynamic_changed = (
@@ -173,7 +174,8 @@ class MimirGatewayVmCharm(ops.CharmBase):
                 traefik.enable()
             service_active = traefik.is_active()
             if service_active:
-                if static_changed or unit_changed or dynamic_pruned or dynamic_changed:
+                # Traefik's file provider hot-reloads dynamic route fragments in place.
+                if static_changed or unit_changed:
                     traefik.restart()
             else:
                 traefik.start()
@@ -203,7 +205,9 @@ class MimirGatewayVmCharm(ops.CharmBase):
             for relation in self._remote_write_relations()
         }
         self.remote_write_provider.publish(relation_urls=relation_urls)
-        query_url = self._relation_query_url(self._remote_write_relations()[0]) if relation_urls else None
+        query_url = (
+            self._relation_query_url(self._remote_write_relations()[0]) if relation_urls else None
+        )
         for relation in self.model.relations.get("grafana-source", []):
             if query_url is None:
                 relation.data[self.unit].pop("grafana_source_host", None)
