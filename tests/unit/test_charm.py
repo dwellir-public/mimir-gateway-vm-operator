@@ -413,6 +413,39 @@ def test_backend_relation_changed_reconciles_gateway(monkeypatch):
     assert state.unit_status.message == "gateway ready: 1 active backend, 1 consumer served"
 
 
+def test_remote_write_relation_changed_with_consumer_metadata_preserves_status(monkeypatch):
+    ctx = _context()
+    backend = _backend_relation()
+    relation = Relation(
+        "receive-remote-write",
+        interface="prometheus_remote_write",
+        remote_app_name="alloy",
+        remote_app_data={"alert_rules": '{"groups": []}'},
+    )
+    configure_calls = []
+
+    monkeypatch.setattr(
+        "charm.MimirGatewayVmCharm._configure",
+        lambda _self, _urls: configure_calls.append(_urls) or True,
+    )
+    monkeypatch.setattr("charm.traefik.get_version", lambda: "3.6.2")
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    monkeypatch.setattr("charm.MimirGatewayVmCharm._publish_consumer_data", lambda _self: None)
+
+    state = ctx.run(
+        ctx.on.relation_changed(relation),
+        testing.State(
+            relations=[backend, relation],
+            unit_status=testing.ActiveStatus("gateway ready: 1 active backend, 1 consumer served"),
+        ),
+    )
+
+    assert configure_calls == []
+    assert state.workload_version == "3.6.2"
+    assert state.unit_status.name == "active"
+    assert state.unit_status.message == "gateway ready: 1 active backend, 1 consumer served"
+
+
 def test_config_changed_starts_traefik_when_service_inactive(monkeypatch):
     ctx = _context()
     backend = _backend_relation()

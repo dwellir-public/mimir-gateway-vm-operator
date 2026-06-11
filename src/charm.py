@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from typing import TypeGuard
 
 import ops
 
@@ -91,7 +92,38 @@ class MimirGatewayVmCharm(ops.CharmBase):
         self._reconcile()
 
     def _on_relation_event(self, event: ops.EventBase) -> None:
+        if self._is_remote_write_relation_changed(event):
+            self._on_remote_write_relation_changed(event)
+            return
         self._reconcile()
+
+    def _is_remote_write_relation_changed(
+        self, event: ops.EventBase
+    ) -> TypeGuard[ops.RelationChangedEvent]:
+        """Return whether the event is consumer data churn on remote-write."""
+        return (
+            isinstance(event, ops.RelationChangedEvent)
+            and event.relation.name == "receive-remote-write"
+        )
+
+    def _on_remote_write_relation_changed(self, event: ops.RelationChangedEvent) -> None:
+        """Log remote-write consumer data changes without changing workload status."""
+        self._set_workload_version()
+        app_name = event.app.name if event.app is not None else ""
+        unit_name = event.unit.name if event.unit is not None else ""
+        app_keys = sorted(event.relation.data[event.app].keys()) if event.app is not None else []
+        unit_keys = (
+            sorted(event.relation.data[event.unit].keys()) if event.unit is not None else []
+        )
+        logger.info(
+            "Ignoring remote-write consumer data change for relation %s: "
+            "remote_app=%s remote_unit=%s app_data_keys=%s unit_data_keys=%s",
+            event.relation.id,
+            app_name,
+            unit_name,
+            app_keys,
+            unit_keys,
+        )
 
     def _reconcile(self) -> None:
         backend = self._backend_state()
