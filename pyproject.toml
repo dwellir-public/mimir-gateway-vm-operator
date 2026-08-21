@@ -6,6 +6,7 @@ name = "mimir-gateway-vm"
 version = "0.0.1"
 requires-python = ">=3.10"
 dependencies = [
+    "cosl",
     "ops>=3,<4",
     "PyYAML",
 ]

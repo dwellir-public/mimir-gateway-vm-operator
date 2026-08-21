@@ -3,6 +3,7 @@
 import json
 
 LEGACY_METADATA_KEYS = ("tenant-id", "application", "model", "model_uuid")
+ALERT_RULES_KEY = "alert_rules"
 
 
 class RemoteWriteProvider:
