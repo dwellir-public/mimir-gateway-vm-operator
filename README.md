@@ -13,7 +13,7 @@ The supported architecture is:
 
 - one shared single-tenant Mimir deployment
 - one shared write URL: `/api/v1/push`
-- one shared query URL: `/prometheus`
+- one shared query URL rooted at `/prometheus`
 - label-based partitioning inside Mimir rather than per-tenant routing
 
 `mimir-gateway-vm` keeps a stable HTTP ingress in front of one or more Mimir
@@ -40,6 +40,15 @@ For operational inspection, `show-gateway-routes` reports:
 `backend` is the Traefik data plane and supplies backend URLs. The gateway
 publishes fixed `/api/v1/push` and `/prometheus` frontend paths on
 `receive-remote-write` and `grafana-source` respectively.
+
+On `grafana-source`, the gateway identifies the Prometheus datasource as
+Mimir and enables data source-managed alert discovery. Grafana can therefore
+list the charm-owned Mimir rules and their evaluated state under Alerting.
+Query and evaluated-rule endpoints under `/prometheus/api/v1` retain their
+standard methods. The ruler configuration endpoint under
+`/prometheus/config/v1/rules` is exposed only for `GET`; `POST` and `DELETE`
+are intentionally unmatched because `mimir-vm` is the sole writer for the
+charm-owned ruler namespace.
 
 Prometheus alert rules arriving from Alloy in `receive-remote-write`
 application data are bridged independently to `mimir-alert-rules`; the
@@ -84,6 +93,12 @@ Active unit reports Waiting with `waiting for Mimir alert-rule destination`.
 Telemetry routing continues, and an existing more important non-Active status
 is not replaced by this rule-only Waiting state. Adding or removing the
 destination relation converges publication and status, including over CMR.
+
+Mimir authentication is disabled in the current machine stack, so the gateway
+listener is a trusted-model-network boundary rather than a public
+authentication boundary. Restrict network access to intended telemetry and
+Grafana consumers. The read-only ruler route is defense in depth and does not
+replace network segmentation or Grafana user-role controls.
 
 ## Configuration
 

@@ -309,8 +309,24 @@ class MimirGatewayVmCharm(ops.CharmBase):
         for relation in self.model.relations.get("grafana-source", []):
             if query_url is None:
                 relation.data[self.unit].pop("grafana_source_host", None)
+                if self.unit.is_leader():
+                    relation.data[self.app].pop("grafana_source_data", None)
             else:
                 relation.data[self.unit]["grafana_source_host"] = query_url
+                if self.unit.is_leader():
+                    relation.data[self.app]["grafana_source_data"] = json.dumps(
+                        {
+                            "model": self.model.name,
+                            "model_uuid": self.model.uuid,
+                            "application": self.app.name,
+                            "type": "prometheus",
+                            "extra_fields": {
+                                "manageAlerts": True,
+                                "prometheusType": "Mimir",
+                            },
+                            "secure_extra_fields": None,
+                        }
+                    )
 
     def _set_workload_version(self) -> None:
         version = traefik.get_version()

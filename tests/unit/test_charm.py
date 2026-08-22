@@ -105,7 +105,11 @@ def test_start_renders_shared_dynamic_configs(monkeypatch):
     assert calls == []
     assert len(written) == 2
     assert all("PathPrefix(`/api/v1/push`)" in content for content in written.values())
-    assert all("PathPrefix(`/prometheus`)" in content for content in written.values())
+    assert all("PathPrefix(`/prometheus/api/v1`)" in content for content in written.values())
+    assert all(
+        "PathPrefix(`/prometheus/config/v1/rules`) && Method(`GET`)" in content
+        for content in written.values()
+    )
     assert all("X-Scope-OrgID" not in content for content in written.values())
     assert all("/tenants/" not in content for content in written.values())
     assert state.unit_status.name == "active"
@@ -226,6 +230,16 @@ def test_grafana_source_relation_publishes_prometheus_url(monkeypatch):
     )
     relation_out = state.get_relation(grafana.id)
     assert relation_out.local_unit_data["grafana_source_host"] == "http://10.0.0.20:80/prometheus"
+    source_data = json.loads(relation_out.local_app_data["grafana_source_data"])
+    assert source_data["application"] == "mimir-gateway-vm"
+    assert source_data["type"] == "prometheus"
+    assert source_data["model"]
+    assert source_data["model_uuid"]
+    assert source_data["extra_fields"] == {
+        "manageAlerts": True,
+        "prometheusType": "Mimir",
+    }
+    assert source_data["secure_extra_fields"] is None
 
 
 def test_grafana_source_relation_keeps_shared_url_when_multiple_consumers_exist(monkeypatch):
@@ -285,11 +299,19 @@ def test_configure_writes_distinct_dynamic_file_per_relation(monkeypatch, tmp_pa
     ctx.run(ctx.on.start(), testing.State(relations=[backend, rel1, rel2]))
     assert set(written) == {f"relation-{rel1.id}.yml", f"relation-{rel2.id}.yml"}
     assert "PathPrefix(`/api/v1/push`)" in written[f"relation-{rel1.id}.yml"]
-    assert "PathPrefix(`/prometheus`)" in written[f"relation-{rel1.id}.yml"]
+    assert "PathPrefix(`/prometheus/api/v1`)" in written[f"relation-{rel1.id}.yml"]
+    assert (
+        "PathPrefix(`/prometheus/config/v1/rules`) && Method(`GET`)"
+        in written[f"relation-{rel1.id}.yml"]
+    )
     assert "X-Scope-OrgID" not in written[f"relation-{rel1.id}.yml"]
     assert "/tenants/" not in written[f"relation-{rel1.id}.yml"]
     assert "PathPrefix(`/api/v1/push`)" in written[f"relation-{rel2.id}.yml"]
-    assert "PathPrefix(`/prometheus`)" in written[f"relation-{rel2.id}.yml"]
+    assert "PathPrefix(`/prometheus/api/v1`)" in written[f"relation-{rel2.id}.yml"]
+    assert (
+        "PathPrefix(`/prometheus/config/v1/rules`) && Method(`GET`)"
+        in written[f"relation-{rel2.id}.yml"]
+    )
     assert "X-Scope-OrgID" not in written[f"relation-{rel2.id}.yml"]
     assert "/tenants/" not in written[f"relation-{rel2.id}.yml"]
 

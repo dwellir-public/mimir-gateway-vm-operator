@@ -8,7 +8,7 @@ def test_render_static_config_includes_entrypoint():
     assert 'address: ":80"' in rendered
 
 
-def test_render_dynamic_config_includes_shared_push_and_query_routes():
+def test_render_dynamic_config_includes_shared_push_query_and_read_only_ruler_routes():
     rendered = render_dynamic_config(
         route_name="shared",
         backend_urls=["http://10.0.0.10:9009"],
@@ -22,7 +22,9 @@ def test_render_dynamic_config_includes_shared_push_and_query_routes():
         "      service: shared",
         "    shared-query:",
     ]
-    assert '      rule: "PathPrefix(`/prometheus`)"' in rendered
+    assert '      rule: "PathPrefix(`/prometheus/api/v1`)"' in rendered
+    assert '      rule: "PathPrefix(`/prometheus/config/v1/rules`) && Method(`GET`)"' in rendered
+    assert '      rule: "PathPrefix(`/prometheus`)"' not in rendered
     assert "X-Scope-OrgID" not in rendered
 
 
@@ -32,7 +34,9 @@ def test_render_dynamic_config_uses_shared_non_tenant_paths():
         backend_urls=["http://10.0.0.10:9009"],
     )
     assert 'rule: "PathPrefix(`/api/v1/push`)"' in rendered
-    assert 'rule: "PathPrefix(`/prometheus`)"' in rendered
+    assert 'rule: "PathPrefix(`/prometheus/api/v1`)"' in rendered
+    assert 'rule: "PathPrefix(`/prometheus/config/v1/rules`) && Method(`GET`)"' in rendered
+    assert 'rule: "PathPrefix(`/prometheus`)"' not in rendered
     assert "/tenants/" not in rendered
 
 
