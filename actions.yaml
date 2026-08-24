@@ -1,2 +1,0 @@
-show-gateway-routes:
-  description: Show shared frontend URLs, relation-scoped route files, and backend URLs.

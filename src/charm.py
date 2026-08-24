@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TypeGuard
 
 import ops
+from charms.prometheus_k8s.v1.prometheus_remote_write import PrometheusRemoteWriteConsumer
 
 import traefik
 from config_builder import (
@@ -21,8 +22,10 @@ from config_builder import (
     render_systemd_unit,
 )
 from remote_write import RemoteWriteProvider
+from rule_bridge import PrometheusRuleBridge
 
 logger = logging.getLogger(__name__)
+RULE_DESTINATION_WAITING_MESSAGE = "waiting for Mimir alert-rule destination"
 
 
 @dataclass(frozen=True)
@@ -38,11 +41,27 @@ class MimirGatewayVmCharm(ops.CharmBase):
     def __init__(self, framework: ops.Framework):
         super().__init__(framework)
         self.remote_write_provider = RemoteWriteProvider(self)
+        self.remote_write_consumer = PrometheusRemoteWriteConsumer(
+            self,
+            relation_name="mimir-alert-rules",
+            peer_relation_name="gateway-peers",
+            forward_alert_rules=False,
+        )
+        self.rule_bridge = PrometheusRuleBridge(self)
         framework.observe(self.on.install, self._on_install)
         framework.observe(self.on.start, self._on_start)
         framework.observe(self.on.config_changed, self._on_config_changed)
         framework.observe(self.on.update_status, self._on_update_status)
         framework.observe(self.on.upgrade_charm, self._on_upgrade_charm)
+        framework.observe(self.on.leader_elected, self._on_leader_elected)
+        for event in (
+            self.on["mimir-alert-rules"].relation_created,
+            self.on["mimir-alert-rules"].relation_joined,
+            self.on["mimir-alert-rules"].relation_changed,
+            self.on["mimir-alert-rules"].relation_departed,
+            self.on["mimir-alert-rules"].relation_broken,
+        ):
+            framework.observe(event, self._on_rule_destination_changed)
         framework.observe(self.on.backend_relation_created, self._on_relation_event)
         framework.observe(self.on.backend_relation_joined, self._on_relation_event)
         framework.observe(self.on.backend_relation_changed, self._on_relation_event)
@@ -71,15 +90,18 @@ class MimirGatewayVmCharm(ops.CharmBase):
             self.unit.status = ops.BlockedStatus(f"Install failed: {exc}")
 
     def _on_start(self, event: ops.StartEvent) -> None:
-        backend = self._backend_state()
-        self.unit.status = ops.MaintenanceStatus("starting gateway")
-        backend_urls = backend.urls if backend is not None else []
-        if not self._configure(backend_urls):
-            return
+        try:
+            backend = self._backend_state()
+            self.unit.status = ops.MaintenanceStatus("starting gateway")
+            backend_urls = backend.urls if backend is not None else []
+            if not self._configure(backend_urls):
+                return
 
-        self._set_workload_version()
-        self._publish_consumer_data()
-        self._refresh_status()
+            self._set_workload_version()
+            self._publish_consumer_data()
+            self._refresh_status()
+        finally:
+            self._reconcile_rules()
 
     def _on_config_changed(self, event: ops.ConfigChangedEvent) -> None:
         self._reconcile()
@@ -87,15 +109,33 @@ class MimirGatewayVmCharm(ops.CharmBase):
     def _on_update_status(self, event: ops.UpdateStatusEvent) -> None:
         self._set_workload_version()
         self._refresh_status()
+        self._reconcile_rules()
 
     def _on_upgrade_charm(self, event: ops.UpgradeCharmEvent) -> None:
         self._reconcile()
+
+    def _on_leader_elected(self, event: ops.LeaderElectedEvent) -> None:
+        """Republish the complete rule snapshot after leadership changes."""
+        self._reconcile_rules()
+
+    def _on_rule_destination_changed(self, event: ops.RelationEvent) -> None:
+        """Publish bridge state after the standard consumer finishes its relation handler."""
+        excluded_destination_id = (
+            event.relation.id if isinstance(event, ops.RelationBrokenEvent) else None
+        )
+        self._reconcile_rules(excluded_destination_id=excluded_destination_id)
 
     def _on_relation_event(self, event: ops.EventBase) -> None:
         if self._is_remote_write_relation_changed(event):
             self._on_remote_write_relation_changed(event)
             return
-        self._reconcile()
+        excluded_rule_relation_id = (
+            event.relation.id
+            if isinstance(event, ops.RelationBrokenEvent)
+            and event.relation.name == "receive-remote-write"
+            else None
+        )
+        self._reconcile(excluded_rule_relation_id=excluded_rule_relation_id)
 
     def _is_remote_write_relation_changed(
         self, event: ops.EventBase
@@ -124,16 +164,42 @@ class MimirGatewayVmCharm(ops.CharmBase):
             app_keys,
             unit_keys,
         )
+        self._reconcile_rules()
 
-    def _reconcile(self) -> None:
-        backend = self._backend_state()
-        self.unit.status = ops.MaintenanceStatus("configuring gateway")
-        backend_urls = backend.urls if backend is not None else []
-        if not self._configure(backend_urls):
-            return
-        self._set_workload_version()
-        self._publish_consumer_data()
-        self._refresh_status()
+    def _reconcile(self, *, excluded_rule_relation_id: int | None = None) -> None:
+        """Converge gateway routing, published endpoints, rules, and workload status."""
+        try:
+            backend = self._backend_state()
+            self.unit.status = ops.MaintenanceStatus("configuring gateway")
+            backend_urls = backend.urls if backend is not None else []
+            if not self._configure(backend_urls):
+                return
+            self._set_workload_version()
+            self._publish_consumer_data()
+            self._refresh_status()
+        finally:
+            self._reconcile_rules(excluded_relation_id=excluded_rule_relation_id)
+
+    def _reconcile_rules(
+        self,
+        *,
+        excluded_relation_id: int | None = None,
+        excluded_destination_id: int | None = None,
+    ) -> None:
+        """Converge bridged rules and apply their narrow status overlay."""
+        result = self.rule_bridge.reconcile(
+            excluded_relation_id=excluded_relation_id,
+            excluded_destination_id=excluded_destination_id,
+        )
+        waiting_for_destination = result.accepted_has_rules and not result.destination_present
+        if waiting_for_destination and isinstance(self.unit.status, ops.ActiveStatus):
+            self.unit.status = ops.WaitingStatus(RULE_DESTINATION_WAITING_MESSAGE)
+        elif (
+            not waiting_for_destination
+            and isinstance(self.unit.status, ops.WaitingStatus)
+            and self.unit.status.message == RULE_DESTINATION_WAITING_MESSAGE
+        ):
+            self._refresh_status()
 
     def _backend_state(self) -> BackendState | None:
         relation = self.model.get_relation("backend")
@@ -243,8 +309,24 @@ class MimirGatewayVmCharm(ops.CharmBase):
         for relation in self.model.relations.get("grafana-source", []):
             if query_url is None:
                 relation.data[self.unit].pop("grafana_source_host", None)
+                if self.unit.is_leader():
+                    relation.data[self.app].pop("grafana_source_data", None)
             else:
                 relation.data[self.unit]["grafana_source_host"] = query_url
+                if self.unit.is_leader():
+                    relation.data[self.app]["grafana_source_data"] = json.dumps(
+                        {
+                            "model": self.model.name,
+                            "model_uuid": self.model.uuid,
+                            "application": self.app.name,
+                            "type": "prometheus",
+                            "extra_fields": {
+                                "manageAlerts": True,
+                                "prometheusType": "Mimir",
+                            },
+                            "secure_extra_fields": None,
+                        }
+                    )
 
     def _set_workload_version(self) -> None:
         version = traefik.get_version()

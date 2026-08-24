@@ -30,6 +30,18 @@ requires:
   backend:
     interface: mimir_gateway_backend
     optional: false
+  mimir-alert-rules:
+    interface: prometheus_remote_write
+    optional: true
+    description: Forward alert rules to the backing Mimir application independently of gateway routing.
+
+peers:
+  gateway-peers:
+    interface: mimir_gateway_peers
+
+actions:
+  show-gateway-routes:
+    description: Show shared frontend URLs, relation-scoped route files, and backend URLs.
 
 config:
   options:
