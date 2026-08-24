@@ -24,6 +24,9 @@ CACHE_DECODED_LIMIT = 2 * 1024 * 1024
 MAX_SOURCE_RELATIONS = 32
 MAX_DEPTH = 32
 MAX_NODES = 10_000
+MAX_AGGREGATE_NODES = MAX_SOURCE_RELATIONS * MAX_NODES
+MAX_CACHE_NODES = MAX_AGGREGATE_NODES + 4
+MAX_CACHE_DEPTH = MAX_DEPTH + 1
 MAX_GROUP_NAME_BYTES = 512
 
 
@@ -74,23 +77,42 @@ def _validate_scalar(value: Any) -> None:
         raise InvalidRuleDocumentError("document contains an unsupported value")
 
 
-def _validate_tree(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -> None:
+def _validate_tree(
+    value: Any,
+    *,
+    max_nodes: int = MAX_NODES,
+    max_depth: int = MAX_DEPTH,
+    depth: int = 0,
+    nodes: list[int] | None = None,
+) -> None:
     """Reject excessively deep or large JSON structures using a bounded tree walk."""
     if nodes is None:
         nodes = [0]
     nodes[0] += 1
-    if nodes[0] > MAX_NODES:
+    if nodes[0] > max_nodes:
         raise InvalidRuleDocumentError("document has too many values")
-    if depth > MAX_DEPTH:
+    if depth > max_depth:
         raise InvalidRuleDocumentError("document is too deeply nested")
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise InvalidRuleDocumentError("object key is not a string")
-            _validate_tree(item, depth=depth + 1, nodes=nodes)
+            _validate_tree(
+                item,
+                max_nodes=max_nodes,
+                max_depth=max_depth,
+                depth=depth + 1,
+                nodes=nodes,
+            )
     elif isinstance(value, list):
         for item in value:
-            _validate_tree(item, depth=depth + 1, nodes=nodes)
+            _validate_tree(
+                item,
+                max_nodes=max_nodes,
+                max_depth=max_depth,
+                depth=depth + 1,
+                nodes=nodes,
+            )
     else:
         _validate_scalar(value)
 
@@ -113,8 +135,8 @@ def _validate_group(group: Any) -> dict[str, Any]:
     return group
 
 
-def parse_rule_groups(raw: str) -> list[dict[str, Any]]:
-    """Parse one bounded standard remote-write alert-rule value into rule groups."""
+def _parse_rule_groups(raw: str, *, max_nodes: int) -> list[dict[str, Any]]:
+    """Parse alert rules using the supplied node ceiling and public depth/size bounds."""
     if not isinstance(raw, str):
         raise InvalidRuleDocumentError("relation value is not text")
     try:
@@ -131,13 +153,18 @@ def parse_rule_groups(raw: str) -> list[dict[str, Any]]:
         )
     except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
         raise InvalidRuleDocumentError("relation value is not valid bounded JSON") from exc
-    _validate_tree(document)
+    _validate_tree(document, max_nodes=max_nodes)
     if not isinstance(document, dict) or set(document) != {"groups"}:
         raise InvalidRuleDocumentError("rule document must contain only groups")
     groups = document["groups"]
     if not isinstance(groups, list):
         raise InvalidRuleDocumentError("groups is not a list")
     return [_validate_group(group) for group in groups]
+
+
+def parse_rule_groups(raw: str) -> list[dict[str, Any]]:
+    """Parse one bounded standard remote-write alert-rule value into rule groups."""
+    return _parse_rule_groups(raw, max_nodes=MAX_NODES)
 
 
 def merge_rule_groups(snapshots: Mapping[int, list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -193,7 +220,11 @@ def _decode_cache(encoded: str) -> _RuleCache:
             object_pairs_hook=_unique_object,
             parse_constant=_reject_json_constant,
         )
-        _validate_tree(document)
+        _validate_tree(
+            document,
+            max_nodes=MAX_CACHE_NODES,
+            max_depth=MAX_CACHE_DEPTH,
+        )
     except (InvalidRuleDocumentError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise InvalidRuleCacheError("cache content is not valid bounded JSON") from exc
     if not isinstance(document, dict) or set(document) != {"accepted", "relations", "version"}:
@@ -218,7 +249,9 @@ def _decode_cache(encoded: str) -> _RuleCache:
         except InvalidRuleDocumentError as exc:
             raise InvalidRuleCacheError("cache relation snapshot is invalid") from exc
     try:
-        accepted = serialize_rule_groups(parse_rule_groups(document["accepted"]))
+        accepted = serialize_rule_groups(
+            _parse_rule_groups(document["accepted"], max_nodes=MAX_AGGREGATE_NODES)
+        )
     except (InvalidRuleDocumentError, TypeError) as exc:
         raise InvalidRuleCacheError("cache accepted snapshot is invalid") from exc
     return _RuleCache(snapshots=snapshots, accepted=accepted)
@@ -232,7 +265,11 @@ def _encode_cache(cache: _RuleCache) -> str:
         "version": CACHE_VERSION,
     }
     try:
-        _validate_tree(document)
+        _validate_tree(
+            document,
+            max_nodes=MAX_CACHE_NODES,
+            max_depth=MAX_CACHE_DEPTH,
+        )
     except InvalidRuleDocumentError as exc:
         raise InvalidRuleCacheError("cache structure exceeds safe bounds") from exc
     raw = json.dumps(
@@ -344,6 +381,6 @@ class PrometheusRuleBridge:
             for relation in destinations:
                 relation.data[self._charm.app][ALERT_RULES_KEY] = accepted
         return RuleBridgeResult(
-            accepted_has_rules=bool(parse_rule_groups(accepted)),
+            accepted_has_rules=bool(_parse_rule_groups(accepted, max_nodes=MAX_AGGREGATE_NODES)),
             destination_present=bool(destinations),
         )

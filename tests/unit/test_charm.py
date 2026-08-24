@@ -784,6 +784,61 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
     assert len(encoded_cache.encode("utf-8")) < CACHE_VALUE_LIMIT
 
 
+def test_peer_cache_persists_multiple_individually_bounded_rule_sources(monkeypatch):
+    """Persist and replay sources whose combined tree exceeds one source's node bound."""
+    ctx = _context()
+    sources = [
+        Relation(
+            "receive-remote-write",
+            interface="prometheus_remote_write",
+            remote_app_name=f"alloy-{index}",
+            remote_app_data={
+                "alert_rules": json.dumps(
+                    {"groups": [{"name": f"group-{index}", "rules": [{}] * 5_000}]}
+                )
+            },
+        )
+        for index in range(2)
+    ]
+    destination = _rule_destination_relation()
+    peers = _peer_relation()
+    monkeypatch.setattr("charm.traefik.get_version", lambda: None)
+
+    state = ctx.run(
+        ctx.on.relation_changed(sources[-1]),
+        testing.State(relations=[*sources, destination, peers], leader=True),
+    )
+
+    cached_peers = state.get_relation(peers.id)
+    assert CACHE_KEY in cached_peers.local_app_data
+    malformed_sources = [
+        replace(
+            state.get_relation(source.id),
+            remote_app_data={"alert_rules": "not-json"},
+        )
+        for source in sources
+    ]
+    cleared_destination = replace(
+        state.get_relation(destination.id), local_app_data={"alert_rules": "{}"}
+    )
+    replayed = ctx.run(
+        ctx.on.leader_elected(),
+        replace(
+            state,
+            relations=[*malformed_sources, cleared_destination, cached_peers],
+            stored_states=[],
+            leader=True,
+        ),
+    )
+
+    published = replayed.get_relation(destination.id).local_app_data["alert_rules"]
+    assert len(published.encode("utf-8")) < CACHE_VALUE_LIMIT
+    assert [group["name"] for group in json.loads(published)["groups"]] == [
+        "group-0",
+        "group-1",
+    ]
+
+
 def test_corrupt_peer_cache_is_rebuilt_without_logging_its_content(monkeypatch, caplog):
     ctx = _context()
     private_cache = "private-corrupt-cache"
