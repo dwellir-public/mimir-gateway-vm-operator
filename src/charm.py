@@ -191,6 +191,25 @@ class MimirGatewayVmCharm(ops.CharmBase):
             excluded_relation_id=excluded_relation_id,
             excluded_destination_id=excluded_destination_id,
         )
+        logger.info(
+            "Rule delivery: received=%d accepted=%d rejected=%d pending=%s",
+            result.received_sources,
+            result.accepted_sources,
+            len(result.errors),
+            result.pending,
+        )
+        if result.errors or result.pending:
+            if isinstance(self.unit.status, (ops.ActiveStatus, ops.WaitingStatus)):
+                self.unit.status = ops.WaitingStatus(
+                    "Alert rule delivery incomplete; "
+                    f"rejected={len(result.errors)} sources={result.errors[:8]}; "
+                    f"pending={result.pending}"
+                )
+            return
+        if isinstance(self.unit.status, ops.WaitingStatus) and self.unit.status.message.startswith(
+            "Alert rule delivery incomplete"
+        ):
+            self.unit.status = ops.ActiveStatus("Alert rule delivery recovered")
         waiting_for_destination = result.accepted_has_rules and not result.destination_present
         if waiting_for_destination and isinstance(self.unit.status, ops.ActiveStatus):
             self.unit.status = ops.WaitingStatus(RULE_DESTINATION_WAITING_MESSAGE)

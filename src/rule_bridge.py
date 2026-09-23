@@ -12,19 +12,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from remote_write import ALERT_RULES_KEY
+from charms.dwellir_observability.v0 import alert_rule_transport as transport
 
 logger = logging.getLogger(__name__)
 
 RELATION_VALUE_LIMIT = 60 * 1024
 CACHE_KEY = "_mimir_rule_bridge_state_v1"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 CACHE_VALUE_LIMIT = 60 * 1024
-CACHE_DECODED_LIMIT = 2 * 1024 * 1024
-MAX_SOURCE_RELATIONS = 32
+CACHE_DECODED_LIMIT = 16 * 1024 * 1024
+MAX_SOURCE_RELATIONS = 1024
 MAX_DEPTH = 32
-MAX_NODES = 10_000
-MAX_AGGREGATE_NODES = MAX_SOURCE_RELATIONS * MAX_NODES
+MAX_NODES = 500_000
+MAX_AGGREGATE_NODES = 2_000_000
 MAX_CACHE_NODES = MAX_AGGREGATE_NODES + 4
 MAX_CACHE_DEPTH = MAX_DEPTH + 1
 MAX_GROUP_NAME_BYTES = 512
@@ -44,6 +44,10 @@ class RuleBridgeResult:
 
     accepted_has_rules: bool
     destination_present: bool
+    errors: tuple[int, ...] = ()
+    pending: bool = False
+    received_sources: int = 0
+    accepted_sources: int = 0
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class _RuleCache:
 
     snapshots: dict[int, list[dict[str, Any]]]
     accepted: str
+    valid: bool = True
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -147,7 +152,7 @@ def _parse_rule_groups(raw: str, *, max_nodes: int) -> list[dict[str, Any]]:
         raise InvalidRuleDocumentError("relation value exceeds the safe size limit")
     try:
         document = json.loads(
-            raw,
+            transport.decode(raw, wire_limit=RELATION_VALUE_LIMIT),
             object_pairs_hook=_unique_object,
             parse_constant=_reject_json_constant,
         )
@@ -178,7 +183,7 @@ def merge_rule_groups(snapshots: Mapping[int, list[dict[str, Any]]]) -> list[dic
 def serialize_rule_groups(groups: list[dict[str, Any]]) -> str:
     """Serialize merged groups compactly and reject values unsafe for a Juju databag."""
     rendered = json.dumps({"groups": groups}, sort_keys=True, separators=(",", ":"))
-    if len(rendered.encode("utf-8")) >= RELATION_VALUE_LIMIT:
+    if len(rendered.encode("utf-8")) > transport.DECODED_LIMIT:
         raise InvalidRuleDocumentError("merged rules exceed the safe size limit")
     return rendered
 
@@ -193,6 +198,11 @@ def _decompress_cache(encoded: str) -> bytes:
         raise InvalidRuleCacheError("cache value is not valid UTF-8 text") from exc
     if encoded_size >= CACHE_VALUE_LIMIT:
         raise InvalidRuleCacheError("cache value exceeds the safe size limit")
+    if encoded.startswith("xz:"):
+        try:
+            return transport.decompress(encoded[3:], maximum=CACHE_DECODED_LIMIT)
+        except ValueError as exc:
+            raise InvalidRuleCacheError("invalid compressed cache") from exc
     try:
         compressed = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
@@ -230,7 +240,7 @@ def _decode_cache(encoded: str) -> _RuleCache:
     if not isinstance(document, dict) or set(document) != {"accepted", "relations", "version"}:
         raise InvalidRuleCacheError("cache structure is invalid")
     relations = document["relations"]
-    if document["version"] != CACHE_VERSION or not isinstance(relations, dict):
+    if document["version"] not in (1, CACHE_VERSION) or not isinstance(relations, dict):
         raise InvalidRuleCacheError("cache version or relation map is invalid")
     if len(relations) > MAX_SOURCE_RELATIONS:
         raise InvalidRuleCacheError("cache contains too many relations")
@@ -244,15 +254,25 @@ def _decode_cache(encoded: str) -> _RuleCache:
             raise InvalidRuleCacheError("cache relation identifier is invalid")
         try:
             snapshots[int(raw_relation_id)] = parse_rule_groups(
-                json.dumps({"groups": groups}, sort_keys=True, separators=(",", ":"))
+                transport.encode(
+                    json.dumps({"groups": groups}, sort_keys=True, separators=(",", ":")),
+                    {transport.ENCODINGS_KEY: transport.ENCODINGS},
+                )
             )
-        except InvalidRuleDocumentError as exc:
+        except ValueError as exc:
             raise InvalidRuleCacheError("cache relation snapshot is invalid") from exc
+    if document["version"] == 2 and document["accepted"] is None:
+        document["accepted"] = serialize_rule_groups(merge_rule_groups(snapshots))
     try:
         accepted = serialize_rule_groups(
-            _parse_rule_groups(document["accepted"], max_nodes=MAX_AGGREGATE_NODES)
+            _parse_rule_groups(
+                transport.encode(
+                    document["accepted"], {transport.ENCODINGS_KEY: transport.ENCODINGS}
+                ),
+                max_nodes=MAX_AGGREGATE_NODES,
+            )
         )
-    except (InvalidRuleDocumentError, TypeError) as exc:
+    except (ValueError, TypeError) as exc:
         raise InvalidRuleCacheError("cache accepted snapshot is invalid") from exc
     return _RuleCache(snapshots=snapshots, accepted=accepted)
 
@@ -260,7 +280,9 @@ def _decode_cache(encoded: str) -> _RuleCache:
 def _encode_cache(cache: _RuleCache) -> str:
     """Serialize leader-shared cache state compactly within one Juju value."""
     document = {
-        "accepted": cache.accepted,
+        "accepted": None
+        if cache.accepted == serialize_rule_groups(merge_rule_groups(cache.snapshots))
+        else cache.accepted,
         "relations": {str(key): value for key, value in sorted(cache.snapshots.items())},
         "version": CACHE_VERSION,
     }
@@ -279,7 +301,7 @@ def _encode_cache(cache: _RuleCache) -> str:
     ).encode("utf-8")
     if len(raw) > CACHE_DECODED_LIMIT:
         raise InvalidRuleCacheError("cache decoded content exceeds safe bounds")
-    encoded = base64.b64encode(zlib.compress(raw, level=9)).decode("ascii")
+    encoded = "xz:" + transport.compress(raw)
     if len(encoded.encode("utf-8")) >= CACHE_VALUE_LIMIT:
         raise InvalidRuleCacheError("cache value exceeds the safe size limit")
     return encoded
@@ -308,7 +330,7 @@ class PrometheusRuleBridge:
             return _decode_cache(raw)
         except InvalidRuleCacheError as exc:
             logger.warning("Ignoring invalid Mimir rule bridge cache: %s", exc)
-            return _RuleCache(snapshots={}, accepted='{"groups":[]}')
+            return _RuleCache(snapshots={}, accepted='{"groups":[]}', valid=False)
 
     def _write_cache(self, cache: _RuleCache) -> bool:
         """Replace peer application cache when leader and within safe bounds."""
@@ -339,48 +361,90 @@ class PrometheusRuleBridge:
             ),
             key=lambda relation: relation.id,
         )
-        if len(current_relations) > MAX_SOURCE_RELATIONS:
-            logger.warning(
-                "Only the first %s Mimir rule source relations are admitted; %s were present",
-                MAX_SOURCE_RELATIONS,
-                len(current_relations),
-            )
-        admitted = current_relations[:MAX_SOURCE_RELATIONS]
-        admitted_ids = {relation.id for relation in admitted}
-        snapshots = {
-            relation_id: groups
-            for relation_id, groups in previous.snapshots.items()
-            if relation_id in admitted_ids
-        }
-        for relation in admitted:
-            raw = relation.data[relation.app].get(ALERT_RULES_KEY, '{"groups":[]}')
-            try:
-                snapshots[relation.id] = parse_rule_groups(raw)
-            except InvalidRuleDocumentError as exc:
+        snapshots, errors = transport.admit(
+            [(r.id, r.data[r.app].get("alert_rules")) for r in current_relations],
+            previous.snapshots,
+            parse_rule_groups,
+            maximum=MAX_SOURCE_RELATIONS,
+        )
+        self._advertise(current_relations)
+        if errors:
+            for offset in range(0, len(errors), 16):
                 logger.warning(
-                    "Retaining last valid Mimir rules for upstream relation %s when present: %s",
-                    relation.id,
-                    exc,
+                    "Rule sources rejected or over capacity: %s", errors[offset : offset + 16]
                 )
 
-        accepted = previous.accepted
-        try:
-            accepted = serialize_rule_groups(merge_rule_groups(snapshots))
-        except InvalidRuleDocumentError as exc:
-            logger.warning("Retaining last accepted downstream Mimir rule state: %s", exc)
-        next_cache = _RuleCache(snapshots=snapshots, accepted=accepted)
-        if not self._write_cache(next_cache):
-            accepted = previous.accepted
+        if not previous.valid and (
+            errors or any(r.data[r.app].get("alert_rules") is None for r in current_relations)
+        ):
+            logger.warning(
+                "Cannot reconstruct rule ownership from invalid cache and incomplete sources"
+            )
+            return RuleBridgeResult(
+                accepted_has_rules=False,
+                destination_present=False,
+                errors=tuple(errors),
+                pending=True,
+                received_sources=len(current_relations),
+                accepted_sources=0,
+            )
 
         destinations = [
             relation
             for relation in self._charm.model.relations.get("mimir-alert-rules", [])
             if relation.id != excluded_destination_id
         ]
+        accepted = previous.accepted
+        pending = False
+        try:
+            accepted = serialize_rule_groups(merge_rule_groups(snapshots))
+        except InvalidRuleDocumentError as exc:
+            pending = True
+            logger.warning("Retaining last accepted downstream Mimir rule state: %s", exc)
+        try:
+            for relation in destinations:
+                remote = relation.data[relation.app] if relation.app else {}
+                transport.encode(accepted, remote)
+        except ValueError:
+            accepted = previous.accepted
+            pending = True
+            logger.warning(
+                "Destination encoding cannot carry desired rules; retaining accepted rules"
+            )
+        next_cache = _RuleCache(snapshots=snapshots, accepted=accepted)
+        if not self._write_cache(next_cache):
+            accepted = previous.accepted
+            pending = True
+
+        pending = self._publish(destinations, accepted) or pending
+        return RuleBridgeResult(
+            accepted_has_rules=bool(json.loads(accepted)["groups"]),
+            destination_present=bool(destinations),
+            errors=tuple(errors),
+            received_sources=len(current_relations),
+            accepted_sources=len(snapshots),
+            pending=pending,
+        )
+
+    def _publish(self, destinations: list[Any], accepted: str) -> bool:
+        """Publish to negotiated peers, retaining their old value on size failure."""
+        pending = False
         if self._charm.unit.is_leader():
             for relation in destinations:
-                relation.data[self._charm.app][ALERT_RULES_KEY] = accepted
-        return RuleBridgeResult(
-            accepted_has_rules=bool(_parse_rule_groups(accepted, max_nodes=MAX_AGGREGATE_NODES)),
-            destination_present=bool(destinations),
-        )
+                remote = relation.data[relation.app] if relation.app else {}
+                try:
+                    payload = transport.encode(accepted, remote)
+                except ValueError:
+                    pending = True
+                    logger.warning(
+                        "Rule destination %s cannot accept current aggregate", relation.id
+                    )
+                    continue
+                relation.data[self._charm.app]["alert_rules"] = payload
+        return pending
+
+    def _advertise(self, current_relations: list[Any]) -> None:
+        """Negotiate reception independently from downstream peer capabilities."""
+        if self._charm.unit.is_leader():
+            for relation in current_relations:
+                relation.data[self._charm.app][transport.ENCODINGS_KEY] = transport.ENCODINGS

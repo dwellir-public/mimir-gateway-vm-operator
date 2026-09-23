@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import yaml
+from charms.dwellir_observability.v0 import alert_rule_transport as transport
 from ops import testing
 from ops.testing import PeerRelation, Relation
 
@@ -163,7 +164,7 @@ def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
     )
     state = ctx.run(ctx.on.start(), testing.State(relations=[backend, relation], leader=True))
     relation_out = state.get_relation(relation.id)
-    assert relation_out.local_app_data == {}
+    assert relation_out.local_app_data == {transport.ENCODINGS_KEY: transport.ENCODINGS}
     assert (
         relation_out.local_unit_data["remote_write"]
         == '{"url": "http://10.0.0.20:80/api/v1/push"}'
@@ -767,6 +768,9 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
         for index in range(MAX_SOURCE_RELATIONS + 1)
     ]
     destination = _rule_destination_relation()
+    destination = replace(
+        destination, remote_app_data={transport.ENCODINGS_KEY: transport.ENCODINGS}
+    )
     peers = _peer_relation()
     monkeypatch.setattr("charm.traefik.get_version", lambda: None)
 
@@ -775,7 +779,9 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
         testing.State(relations=[*sources, destination, peers], leader=True),
     )
 
-    groups = json.loads(state.get_relation(destination.id).local_app_data["alert_rules"])["groups"]
+    groups = json.loads(
+        transport.decode(state.get_relation(destination.id).local_app_data["alert_rules"])
+    )["groups"]
     admitted = sorted(sources, key=lambda item: item.id)[:MAX_SOURCE_RELATIONS]
     admitted_names = {source.remote_app_name for source in admitted}
     assert len(groups) == MAX_SOURCE_RELATIONS
