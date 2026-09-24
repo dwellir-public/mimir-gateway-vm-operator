@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from charms.dwellir_observability.v0 import alert_rule_transport as transport
+from charms.dwellir_observability.v0 import source_admission
 
 logger = logging.getLogger(__name__)
 
@@ -358,7 +359,7 @@ class PrometheusRuleBridge:
             ),
             key=lambda relation: relation.id,
         )
-        snapshots, errors = transport.admit(
+        snapshots, errors = source_admission.admit(
             [(r.id, r.data[r.app].get("alert_rules")) for r in current_relations],
             previous.snapshots,
             parse_rule_groups,
