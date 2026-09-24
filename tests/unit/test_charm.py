@@ -8,7 +8,7 @@ from ops import testing
 from ops.testing import PeerRelation, Relation
 
 from charm import MimirGatewayVmCharm
-from rule_bridge import CACHE_KEY, CACHE_VALUE_LIMIT, MAX_SOURCE_RELATIONS
+from rule_bridge import CACHE_KEY, CACHE_VALUE_LIMIT
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -765,7 +765,7 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
                 )
             },
         )
-        for index in range(MAX_SOURCE_RELATIONS + 1)
+        for index in range(1025)
     ]
     destination = _rule_destination_relation()
     destination = replace(
@@ -782,9 +782,9 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
     groups = json.loads(
         transport.decode(state.get_relation(destination.id).local_app_data["alert_rules"])
     )["groups"]
-    admitted = sorted(sources, key=lambda item: item.id)[:MAX_SOURCE_RELATIONS]
+    admitted = sorted(sources, key=lambda item: item.id)
     admitted_names = {source.remote_app_name for source in admitted}
-    assert len(groups) == MAX_SOURCE_RELATIONS
+    assert len(groups) == 1025
     assert {f"alloy-{int(group['name'].split('-')[1])}" for group in groups} == admitted_names
     encoded_cache = state.get_relation(peers.id).local_app_data[CACHE_KEY]
     assert len(encoded_cache.encode("utf-8")) < CACHE_VALUE_LIMIT

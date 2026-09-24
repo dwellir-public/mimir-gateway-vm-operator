@@ -21,7 +21,6 @@ CACHE_KEY = "_mimir_rule_bridge_state_v1"
 CACHE_VERSION = 2
 CACHE_VALUE_LIMIT = 60 * 1024
 CACHE_DECODED_LIMIT = 16 * 1024 * 1024
-MAX_SOURCE_RELATIONS = 1024
 MAX_DEPTH = 32
 MAX_NODES = 500_000
 MAX_AGGREGATE_NODES = 2_000_000
@@ -242,8 +241,6 @@ def _decode_cache(encoded: str) -> _RuleCache:
     relations = document["relations"]
     if document["version"] not in (1, CACHE_VERSION) or not isinstance(relations, dict):
         raise InvalidRuleCacheError("cache version or relation map is invalid")
-    if len(relations) > MAX_SOURCE_RELATIONS:
-        raise InvalidRuleCacheError("cache contains too many relations")
     snapshots: dict[int, list[dict[str, Any]]] = {}
     for raw_relation_id, groups in relations.items():
         if (
@@ -365,7 +362,6 @@ class PrometheusRuleBridge:
             [(r.id, r.data[r.app].get("alert_rules")) for r in current_relations],
             previous.snapshots,
             parse_rule_groups,
-            maximum=MAX_SOURCE_RELATIONS,
         )
         self._advertise(current_relations)
         if errors:
