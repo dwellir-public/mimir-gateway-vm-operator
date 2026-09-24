@@ -352,6 +352,7 @@ class PrometheusRuleBridge:
         *,
         excluded_relation_id: int | None = None,
         excluded_destination_id: int | None = None,
+        source_relation: Any | None = None,
     ) -> RuleBridgeResult:
         """Validate bounded upstream state and publish the leader-owned accepted aggregate."""
         previous = self._read_cache()
@@ -368,7 +369,11 @@ class PrometheusRuleBridge:
             previous.snapshots,
             parse_rule_groups,
         )
-        self._advertise(current_relations)
+        publication_relations = current_relations
+        if source_relation is not None and previous.valid:
+            selected = [r for r in current_relations if r.id == source_relation.id]
+            publication_relations = selected or current_relations
+        self._advertise(publication_relations)
         if errors:
             for offset in range(0, len(errors), 16):
                 logger.warning(

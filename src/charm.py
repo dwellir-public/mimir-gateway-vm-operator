@@ -135,7 +135,16 @@ class MimirGatewayVmCharm(ops.CharmBase):
             and event.relation.name == "receive-remote-write"
             else None
         )
-        self._reconcile(excluded_rule_relation_id=excluded_rule_relation_id)
+        self._reconcile(
+            excluded_rule_relation_id=excluded_rule_relation_id,
+            source_relation=(
+                event.relation
+                if isinstance(event, ops.RelationEvent)
+                and event.relation.name == "receive-remote-write"
+                and not isinstance(event, ops.RelationBrokenEvent)
+                else None
+            ),
+        )
 
     def _is_remote_write_relation_changed(
         self, event: ops.EventBase
@@ -164,9 +173,14 @@ class MimirGatewayVmCharm(ops.CharmBase):
             app_keys,
             unit_keys,
         )
-        self._reconcile_rules()
+        self._reconcile_rules(source_relation=event.relation)
 
-    def _reconcile(self, *, excluded_rule_relation_id: int | None = None) -> None:
+    def _reconcile(
+        self,
+        *,
+        excluded_rule_relation_id: int | None = None,
+        source_relation: ops.Relation | None = None,
+    ) -> None:
         """Converge gateway routing, published endpoints, rules, and workload status."""
         try:
             backend = self._backend_state()
@@ -175,21 +189,28 @@ class MimirGatewayVmCharm(ops.CharmBase):
             if not self._configure(backend_urls):
                 return
             self._set_workload_version()
-            self._publish_consumer_data()
+            if source_relation is None:
+                self._publish_consumer_data()
+            else:
+                self._publish_consumer_data(source_relation=source_relation)
             self._refresh_status()
         finally:
-            self._reconcile_rules(excluded_relation_id=excluded_rule_relation_id)
+            self._reconcile_rules(
+                excluded_relation_id=excluded_rule_relation_id, source_relation=source_relation
+            )
 
     def _reconcile_rules(
         self,
         *,
         excluded_relation_id: int | None = None,
         excluded_destination_id: int | None = None,
+        source_relation: ops.Relation | None = None,
     ) -> None:
         """Converge bridged rules and apply their narrow status overlay."""
         result = self.rule_bridge.reconcile(
             excluded_relation_id=excluded_relation_id,
             excluded_destination_id=excluded_destination_id,
+            source_relation=source_relation,
         )
         logger.info(
             "Rule delivery: received=%d accepted=%d rejected=%d pending=%s",
@@ -316,15 +337,22 @@ class MimirGatewayVmCharm(ops.CharmBase):
             )
         return rendered
 
-    def _publish_consumer_data(self) -> None:
-        relation_urls = {
-            relation.id: self._relation_write_url(relation)
-            for relation in self._remote_write_relations()
-        }
-        self.remote_write_provider.publish(relation_urls=relation_urls)
-        query_url = (
-            self._relation_query_url(self._remote_write_relations()[0]) if relation_urls else None
-        )
+    def _publish_consumer_data(self, source_relation: ops.Relation | None = None) -> None:
+        """Target steady source publication; retain full fallback for endpoint changes."""
+        relations = self._remote_write_relations()
+        if source_relation is not None and source_relation.id not in {r.id for r in relations}:
+            source_relation = None
+        if source_relation is not None:
+            expected = {"url": self._relation_write_url(source_relation)}
+            try:
+                previous = json.loads(source_relation.data[self.unit].get("remote_write", ""))
+            except (ValueError, TypeError):
+                previous = None
+            if previous != expected:
+                source_relation = None
+        relation_urls = {relation.id: self._relation_write_url(relation) for relation in relations}
+        self.remote_write_provider.publish(relation_urls=relation_urls, relation=source_relation)
+        query_url = self._relation_query_url(relations[0]) if relation_urls else None
         for relation in self.model.relations.get("grafana-source", []):
             if query_url is None:
                 relation.data[self.unit].pop("grafana_source_host", None)

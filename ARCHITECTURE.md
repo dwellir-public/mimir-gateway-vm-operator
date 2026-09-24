@@ -57,3 +57,15 @@ matching cache ready without attempting a write. Downstream publication remains
 the leader's responsibility: Ops does not allow followers to read their own
 application databag on non-peer relations. Follower readiness therefore does not
 independently prove delivery to the ruler.
+
+### Publication during source events
+
+Source events advertise rule encodings only on the active source relation, while
+rule admission still reads every source and reconciles the full accepted snapshot.
+Endpoint publication can target an existing source when its published unit URL
+already matches the current frontend. A missing or changed URL uses global
+publication, as do configuration, backend/ingress and upgrade recovery paths.
+Leadership still republishes capabilities and accepted rules globally. This
+conservative fallback avoids adding frontend state; newly joined sources may
+still require a full endpoint publication pass. Followers publish only their own
+unit endpoints; application data remains leader-owned.

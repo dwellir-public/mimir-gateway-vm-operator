@@ -1274,3 +1274,158 @@ def test_follower_observes_committed_peer_cache_without_writing_app_data(monkeyp
     )
     for relation in before:
         assert result.get_relation(relation.id).local_app_data == relation.local_app_data
+
+
+@pytest.mark.parametrize(
+    "event_name", ["relation_changed", "leader_elected", "upgrade_charm", "cache_recovery"]
+)
+def test_publication_scope_local_bag_access_and_full_remote_scan(monkeypatch, event_name):
+    """Source churn targets its own publication; global recovery still visits every source."""
+    from ops.model import RelationData
+
+    sources = [
+        testing.Relation(
+            "receive-remote-write",
+            remote_app_name=f"source-{i}",
+            remote_app_data={"alert_rules": "malformed" if i else '{"groups": []}'},
+        )
+        for i in range(2)
+    ]
+    local_ids = set()
+    remote_ids = set()
+    original = RelationData.__getitem__
+
+    def observe(data, entity):
+        if data.relation.id in {r.id for r in sources}:
+            if entity.name.startswith("source-"):
+                remote_ids.add(data.relation.id)
+            else:
+                local_ids.add(data.relation.id)
+        return original(data, entity)
+
+    monkeypatch.setattr(RelationData, "__getitem__", observe)
+    monkeypatch.setattr(MimirGatewayVmCharm, "_configure", lambda *args: True)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    ctx = _context()
+    event = (
+        ctx.on.relation_changed(sources[0])
+        if event_name in {"relation_changed", "cache_recovery"}
+        else getattr(ctx.on, event_name)()
+    )
+    relations: list[testing.Relation | testing.PeerRelation] = list(sources)
+    if event_name == "cache_recovery":
+        relations.append(
+            testing.PeerRelation("gateway-peers", local_app_data={CACHE_KEY: "broken"})
+        )
+    result = ctx.run(
+        event, testing.State(relations=relations, leader=True, unit_status=testing.ActiveStatus())
+    )
+    assert local_ids == (
+        {sources[0].id} if event_name == "relation_changed" else {r.id for r in sources}
+    )
+    assert remote_ids == {r.id for r in sources}
+    assert result.unit_status.name == "waiting"
+    assert "rejected=1" in result.unit_status.message
+
+
+@pytest.mark.parametrize("previous_url", ["http://10.0.0.20:80/api/v1/push", "http://old", None])
+@pytest.mark.parametrize("leader", [True, False])
+def test_source_joined_endpoint_scope_and_global_rotation_fallback(
+    monkeypatch, previous_url, leader
+):
+    from ops.model import RelationData
+
+    monkeypatch.setattr(
+        MimirGatewayVmCharm, "_external_url_base", lambda self: "http://10.0.0.20:80"
+    )
+    monkeypatch.setattr(MimirGatewayVmCharm, "_configure", lambda *args: True)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    first = replace(
+        _remote_write_relation(),
+        local_unit_data={"remote_write": json.dumps({"url": previous_url})}
+        if previous_url
+        else {},
+    )
+    second = replace(
+        _remote_write_relation(), local_unit_data={"remote_write": '{"url":"http://other"}'}
+    )
+    touched = set()
+    original = RelationData.__getitem__
+
+    def spy(data, entity):
+        if data.relation.id in {first.id, second.id} and entity.name in {
+            "mimir-gateway-vm",
+            "mimir-gateway-vm/0",
+        }:
+            touched.add(data.relation.id)
+        return original(data, entity)
+
+    monkeypatch.setattr(RelationData, "__getitem__", spy)
+    ctx = _context()
+    state = ctx.run(
+        ctx.on.relation_joined(first, remote_unit=0),
+        testing.State(relations=[_backend_relation(), first, second], leader=leader),
+    )
+    scoped = previous_url == "http://10.0.0.20:80/api/v1/push"
+    assert touched == ({first.id} if scoped else {first.id, second.id})
+    assert json.loads(state.get_relation(second.id).local_unit_data["remote_write"])["url"] == (
+        "http://other" if scoped else "http://10.0.0.20:80/api/v1/push"
+    )
+
+
+@pytest.mark.parametrize("event_name", ["config_changed", "upgrade_charm", "backend_changed"])
+def test_global_events_rotate_all_source_endpoints(monkeypatch, event_name):
+    monkeypatch.setattr(MimirGatewayVmCharm, "_external_url_base", lambda self: "http://new:80")
+    monkeypatch.setattr(MimirGatewayVmCharm, "_configure", lambda *args: True)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    sources = [
+        replace(_remote_write_relation(), local_unit_data={"remote_write": '{"url":"http://old"}'})
+        for _ in range(2)
+    ]
+    backend = _backend_relation()
+    ctx = _context()
+    event = (
+        ctx.on.relation_changed(backend)
+        if event_name == "backend_changed"
+        else getattr(ctx.on, event_name)()
+    )
+    result = ctx.run(event, testing.State(relations=[backend, *sources], leader=True))
+    assert result.unit_status.name == "active"
+    for source in sources:
+        assert json.loads(result.get_relation(source.id).local_unit_data["remote_write"]) == {
+            "url": "http://new:80/api/v1/push"
+        }
+
+
+@pytest.mark.parametrize("phase", ["endpoint", "capability"])
+def test_removed_event_source_falls_back_without_accessing_removed_bag(monkeypatch, phase):
+    from ops.model import RelationData
+
+    monkeypatch.setattr(MimirGatewayVmCharm, "_external_url_base", lambda self: "http://new:80")
+    harness = testing.Harness(MimirGatewayVmCharm)
+    harness.set_leader(True)
+    harness.begin()
+    harness.disable_hooks()
+    active = [harness.add_relation("receive-remote-write", f"source-{i}") for i in range(2)]
+    removed_id = harness.add_relation("receive-remote-write", "removed")
+    removed = harness.model.get_relation("receive-remote-write", removed_id)
+    harness.remove_relation(removed_id)
+    touched = set()
+    original = RelationData.__getitem__
+
+    def spy(data, entity):
+        assert data.relation.id != removed_id, "Removed event relation must not be accessed"
+        if data.relation.id in active and entity.name in {
+            harness.charm.app.name,
+            harness.charm.unit.name,
+        }:
+            touched.add(data.relation.id)
+        return original(data, entity)
+
+    monkeypatch.setattr(RelationData, "__getitem__", spy)
+    if phase == "endpoint":
+        harness.charm._publish_consumer_data(source_relation=removed)
+    else:
+        harness.charm.rule_bridge.reconcile(source_relation=removed)
+    assert touched == set(active)
+    harness.cleanup()
