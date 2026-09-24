@@ -49,3 +49,11 @@ The workload distribution class is direct artifact download. Charm upgrades may
 update orchestration logic independently of the installed Traefik version.
 Workload upgrade and recovery behavior will be implemented through explicit
 download, render, and restart flows.
+
+
+Follower rule readiness uses the leader-owned peer cache. A follower waits when
+its current source candidate differs from the committed cache, and considers a
+matching cache ready without attempting a write. Downstream publication remains
+the leader's responsibility: Ops does not allow followers to read their own
+application databag on non-peer relations. Follower readiness therefore does not
+independently prove delivery to the ruler.

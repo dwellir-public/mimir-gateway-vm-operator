@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import yaml
 from charms.dwellir_observability.v0 import alert_rule_transport as transport
 from ops import testing
@@ -1195,3 +1196,47 @@ def test_config_changed_restarts_active_traefik_for_static_config_updates(monkey
     state = ctx.run(ctx.on.config_changed(), testing.State(relations=[backend]))
     assert calls == ["restart"]
     assert state.unit_status.name == "active"
+
+
+@pytest.mark.parametrize("lag", ["none", "source", "destination", "corrupt-cache"])
+def test_follower_observes_committed_peer_cache_without_writing_app_data(monkeypatch, lag):
+    """Followers observe peer commits; only leaders inspect and write downstream app data."""
+    ctx = _context()
+    group = {"name": "follower", "rules": [{"alert": "Follower", "expr": "up"}]}
+    source = Relation(
+        "receive-remote-write",
+        remote_app_name="alloy",
+        remote_app_data={"alert_rules": json.dumps({"groups": [group]})},
+    )
+    destination = _rule_destination_relation()
+    peers = _peer_relation()
+    initial = ctx.run(
+        ctx.on.relation_changed(source),
+        testing.State(
+            relations=[source, destination, peers],
+            leader=True,
+            unit_status=testing.ActiveStatus("gateway ready"),
+        ),
+    )
+    source = initial.get_relation(source.id)
+    destination = initial.get_relation(destination.id)
+    peers = initial.get_relation(peers.id)
+    if lag == "source":
+        changed = {**group, "name": "new-uncommitted-source"}
+        source = replace(
+            source, remote_app_data={"alert_rules": json.dumps({"groups": [changed]})}
+        )
+    elif lag == "destination":
+        destination = replace(destination, local_app_data={"alert_rules": '{"groups":[]}'})
+    elif lag == "corrupt-cache":
+        peers = replace(peers, local_app_data={CACHE_KEY: "corrupt-cache"})
+    before = [source, destination, peers]
+    state = replace(
+        initial, relations=before, leader=False, unit_status=testing.ActiveStatus("gateway ready")
+    )
+    result = ctx.run(ctx.on.relation_changed(source), state)
+    assert result.unit_status.name == (
+        "waiting" if lag in {"source", "corrupt-cache"} else "active"
+    )
+    for relation in before:
+        assert result.get_relation(relation.id).local_app_data == relation.local_app_data

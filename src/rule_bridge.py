@@ -330,11 +330,15 @@ class PrometheusRuleBridge:
             logger.warning("Ignoring invalid Mimir rule bridge cache: %s", exc)
             return _RuleCache(snapshots={}, accepted='{"groups":[]}', valid=False)
 
-    def _write_cache(self, cache: _RuleCache) -> bool:
-        """Replace peer application cache when leader and within safe bounds."""
+    def _write_cache(self, cache: _RuleCache, previous: _RuleCache) -> bool:
+        """Commit as leader, or confirm that a follower's candidate is already committed."""
         peer = self._peer_relation()
-        if peer is None or not self._charm.unit.is_leader():
-            return peer is None
+        if peer is None:
+            return True
+        if not self._charm.unit.is_leader():
+            # A follower cannot write app data. A matching leader-owned cache
+            # is already committed; a different candidate is still pending.
+            return previous.valid and cache == previous
         try:
             encoded = _encode_cache(cache)
         except InvalidRuleCacheError as exc:
@@ -409,7 +413,7 @@ class PrometheusRuleBridge:
                 "Destination encoding cannot carry desired rules; retaining accepted rules"
             )
         next_cache = _RuleCache(snapshots=snapshots, accepted=accepted)
-        if not self._write_cache(next_cache):
+        if not self._write_cache(next_cache, previous):
             accepted = previous.accepted
             pending = True
 
