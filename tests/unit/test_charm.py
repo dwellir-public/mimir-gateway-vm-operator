@@ -139,6 +139,40 @@ def test_remote_write_relation_publishes_shared_gateway_url(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("operation", ["publish", "withdraw", "clear"])
+def test_follower_remote_write_updates_only_its_unit_data(monkeypatch, operation):
+    """Follower endpoint reconciliation must not access leader-owned app data."""
+    from remote_write import RemoteWriteProvider
+
+    def reconcile(charm, **_kwargs):
+        provider = RemoteWriteProvider(charm)
+        relation = charm.model.relations["receive-remote-write"][0]
+        if operation == "clear":
+            provider.clear()
+        else:
+            urls = {relation.id: "http://10.0.0.21:80/api/v1/push"}
+            provider.publish(relation_urls=urls if operation == "publish" else {})
+
+    monkeypatch.setattr(MimirGatewayVmCharm, "_reconcile", reconcile)
+    relation = replace(
+        _remote_write_relation(),
+        local_app_data={"tenant-id": "leader-owned", "unrelated": "preserved"},
+        local_unit_data={"remote_write": '{"url": "http://old"}', "other": "preserved"},
+    )
+    ctx = _context()
+    result = ctx.run(
+        ctx.on.relation_created(relation), testing.State(relations=[relation], leader=False)
+    ).get_relation(relation.id)
+    assert result.local_app_data == relation.local_app_data
+    assert result.local_unit_data["other"] == "preserved"
+    if operation == "publish":
+        assert json.loads(result.local_unit_data["remote_write"]) == {
+            "url": "http://10.0.0.21:80/api/v1/push"
+        }
+    else:
+        assert "remote_write" not in result.local_unit_data
+
+
 def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
     ctx = _context()
 
