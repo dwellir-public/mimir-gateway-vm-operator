@@ -19,6 +19,13 @@ rather than free-form host config.
 installation, config-file writes, and service lifecycle are isolated in
 Juju-independent helper modules so they can be unit tested directly.
 
+`src/rule_bridge.py` owns alert-source caches and downstream publication. The
+reference-owned `alert_rule_transport` adapter negotiates JSON/LZMA encoding;
+the separate `source_admission` helper preserves accepted source state within
+the decoded-byte budget. Both are exact vendored copies pinned by commit and
+hash in `dependencies/shared.json`. Canonical `cosl` supplies compression.
+Neither helper owns Traefik lifecycle or backend reconciliation.
+
 ## Integrations
 
 - `backend`: supplies one or more Mimir backend URLs
