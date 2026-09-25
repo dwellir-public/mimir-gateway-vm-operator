@@ -1429,3 +1429,46 @@ def test_removed_event_source_falls_back_without_accessing_removed_bag(monkeypat
         harness.charm.rule_bridge.reconcile(source_relation=removed)
     assert touched == set(active)
     harness.cleanup()
+
+
+@pytest.mark.parametrize("committed_cache", ["valid", "corrupt"])
+def test_follower_recovers_on_peer_cache_change_without_app_writes(monkeypatch, committed_cache):
+    """A leader commit completes source-before-cache delivery without waiting for a timer."""
+    ctx = _context()
+    group = {"name": "follower", "rules": [{"alert": "Follower", "expr": "up"}]}
+    source = testing.Relation(
+        "receive-remote-write",
+        remote_app_name="alloy",
+        remote_app_data={"alert_rules": json.dumps({"groups": [group]})},
+    )
+    destination = testing.Relation("mimir-alert-rules", remote_app_name="mimir")
+    peers = testing.PeerRelation("gateway-peers", peers_data={1: {}})
+    initial = ctx.run(
+        ctx.on.relation_changed(source),
+        testing.State(
+            relations=[source, destination, peers],
+            leader=True,
+            unit_status=testing.ActiveStatus("gateway ready"),
+        ),
+    )
+    source = replace(
+        initial.get_relation(source.id),
+        remote_app_data={"alert_rules": json.dumps({"groups": [{**group, "name": "new-source"}]})},
+    )
+    relations = [source, initial.get_relation(destination.id), initial.get_relation(peers.id)]
+    follower = ctx.run(
+        ctx.on.relation_changed(source), replace(initial, leader=False, relations=relations)
+    )
+    assert follower.unit_status.name == "waiting"
+    assert "pending=True" in follower.unit_status.message
+    leader = ctx.run(ctx.on.relation_changed(source), replace(initial, relations=relations))
+    committed = leader.get_relation(peers.id)
+    if committed_cache == "corrupt":
+        committed = replace(committed, local_app_data={CACHE_KEY: "corrupt-cache"})
+    before = [follower.get_relation(source.id), follower.get_relation(destination.id), committed]
+    recovered = ctx.run(
+        ctx.on.relation_changed(committed, remote_unit=1), replace(follower, relations=before)
+    )
+    assert recovered.unit_status.name == ("active" if committed_cache == "valid" else "waiting")
+    for relation in before:
+        assert recovered.get_relation(relation.id).local_app_data == relation.local_app_data

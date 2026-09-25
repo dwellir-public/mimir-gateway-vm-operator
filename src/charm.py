@@ -54,6 +54,7 @@ class MimirGatewayVmCharm(ops.CharmBase):
         framework.observe(self.on.update_status, self._on_update_status)
         framework.observe(self.on.upgrade_charm, self._on_upgrade_charm)
         framework.observe(self.on.leader_elected, self._on_leader_elected)
+        framework.observe(self.on.gateway_peers_relation_changed, self._on_rule_cache_changed)
         for event in (
             self.on["mimir-alert-rules"].relation_created,
             self.on["mimir-alert-rules"].relation_joined,
@@ -198,6 +199,10 @@ class MimirGatewayVmCharm(ops.CharmBase):
             self._reconcile_rules(
                 excluded_relation_id=excluded_rule_relation_id, source_relation=source_relation
             )
+
+    def _on_rule_cache_changed(self, event: ops.RelationChangedEvent) -> None:
+        """Recheck follower readiness when the leader commits accepted rule state."""
+        self._reconcile_rules()
 
     def _reconcile_rules(
         self,
