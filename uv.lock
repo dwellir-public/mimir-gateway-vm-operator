@@ -239,7 +239,7 @@ unit = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cosl" },
+    { name = "cosl", specifier = ">=1.10.3,<2" },
     { name = "ops", specifier = ">=3,<4" },
     { name = "pyyaml" },
 ]

@@ -2,12 +2,14 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import yaml
+from cosl import LZMABase64
 from ops import testing
 from ops.testing import PeerRelation, Relation
 
 from charm import MimirGatewayVmCharm
-from rule_bridge import CACHE_KEY, CACHE_VALUE_LIMIT, MAX_SOURCE_RELATIONS
+from rule_bridge import CACHE_KEY, CACHE_VALUE_LIMIT
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -137,6 +139,40 @@ def test_remote_write_relation_publishes_shared_gateway_url(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("operation", ["publish", "withdraw", "clear"])
+def test_follower_remote_write_updates_only_its_unit_data(monkeypatch, operation):
+    """Follower endpoint reconciliation must not access leader-owned app data."""
+    from remote_write import RemoteWriteProvider
+
+    def reconcile(charm, **_kwargs):
+        provider = RemoteWriteProvider(charm)
+        relation = charm.model.relations["receive-remote-write"][0]
+        if operation == "clear":
+            provider.clear()
+        else:
+            urls = {relation.id: "http://10.0.0.21:80/api/v1/push"}
+            provider.publish(relation_urls=urls if operation == "publish" else {})
+
+    monkeypatch.setattr(MimirGatewayVmCharm, "_reconcile", reconcile)
+    relation = replace(
+        _remote_write_relation(),
+        local_app_data={"tenant-id": "leader-owned", "unrelated": "preserved"},
+        local_unit_data={"remote_write": '{"url": "http://old"}', "other": "preserved"},
+    )
+    ctx = _context()
+    result = ctx.run(
+        ctx.on.relation_created(relation), testing.State(relations=[relation], leader=False)
+    ).get_relation(relation.id)
+    assert result.local_app_data == relation.local_app_data
+    assert result.local_unit_data["other"] == "preserved"
+    if operation == "publish":
+        assert json.loads(result.local_unit_data["remote_write"]) == {
+            "url": "http://10.0.0.21:80/api/v1/push"
+        }
+    else:
+        assert "remote_write" not in result.local_unit_data
+
+
 def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
     ctx = _context()
 
@@ -163,7 +199,7 @@ def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
     )
     state = ctx.run(ctx.on.start(), testing.State(relations=[backend, relation], leader=True))
     relation_out = state.get_relation(relation.id)
-    assert relation_out.local_app_data == {}
+    assert relation_out.local_app_data == {"alert_rules_encodings": '["lzma", "json"]'}
     assert (
         relation_out.local_unit_data["remote_write"]
         == '{"url": "http://10.0.0.20:80/api/v1/push"}'
@@ -764,9 +800,12 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
                 )
             },
         )
-        for index in range(MAX_SOURCE_RELATIONS + 1)
+        for index in range(1025)
     ]
     destination = _rule_destination_relation()
+    destination = replace(
+        destination, remote_app_data={"alert_rules_encodings": '["lzma", "json"]'}
+    )
     peers = _peer_relation()
     monkeypatch.setattr("charm.traefik.get_version", lambda: None)
 
@@ -775,10 +814,12 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
         testing.State(relations=[*sources, destination, peers], leader=True),
     )
 
-    groups = json.loads(state.get_relation(destination.id).local_app_data["alert_rules"])["groups"]
-    admitted = sorted(sources, key=lambda item: item.id)[:MAX_SOURCE_RELATIONS]
+    groups = json.loads(
+        LZMABase64.decompress(state.get_relation(destination.id).local_app_data["alert_rules"])
+    )["groups"]
+    admitted = sorted(sources, key=lambda item: item.id)
     admitted_names = {source.remote_app_name for source in admitted}
-    assert len(groups) == MAX_SOURCE_RELATIONS
+    assert len(groups) == 1025
     assert {f"alloy-{int(group['name'].split('-')[1])}" for group in groups} == admitted_names
     encoded_cache = state.get_relation(peers.id).local_app_data[CACHE_KEY]
     assert len(encoded_cache.encode("utf-8")) < CACHE_VALUE_LIMIT
@@ -1189,3 +1230,245 @@ def test_config_changed_restarts_active_traefik_for_static_config_updates(monkey
     state = ctx.run(ctx.on.config_changed(), testing.State(relations=[backend]))
     assert calls == ["restart"]
     assert state.unit_status.name == "active"
+
+
+@pytest.mark.parametrize("lag", ["none", "source", "destination", "corrupt-cache"])
+def test_follower_observes_committed_peer_cache_without_writing_app_data(monkeypatch, lag):
+    """Followers observe peer commits; only leaders inspect and write downstream app data."""
+    ctx = _context()
+    group = {"name": "follower", "rules": [{"alert": "Follower", "expr": "up"}]}
+    source = Relation(
+        "receive-remote-write",
+        remote_app_name="alloy",
+        remote_app_data={"alert_rules": json.dumps({"groups": [group]})},
+    )
+    destination = _rule_destination_relation()
+    peers = _peer_relation()
+    initial = ctx.run(
+        ctx.on.relation_changed(source),
+        testing.State(
+            relations=[source, destination, peers],
+            leader=True,
+            unit_status=testing.ActiveStatus("gateway ready"),
+        ),
+    )
+    source = initial.get_relation(source.id)
+    destination = initial.get_relation(destination.id)
+    peers = initial.get_relation(peers.id)
+    if lag == "source":
+        changed = {**group, "name": "new-uncommitted-source"}
+        source = replace(
+            source, remote_app_data={"alert_rules": json.dumps({"groups": [changed]})}
+        )
+    elif lag == "destination":
+        destination = replace(destination, local_app_data={"alert_rules": '{"groups":[]}'})
+    elif lag == "corrupt-cache":
+        peers = replace(peers, local_app_data={CACHE_KEY: "corrupt-cache"})
+    before = [source, destination, peers]
+    state = replace(
+        initial, relations=before, leader=False, unit_status=testing.ActiveStatus("gateway ready")
+    )
+    result = ctx.run(ctx.on.relation_changed(source), state)
+    assert result.unit_status.name == (
+        "waiting" if lag in {"source", "corrupt-cache"} else "active"
+    )
+    for relation in before:
+        assert result.get_relation(relation.id).local_app_data == relation.local_app_data
+
+
+@pytest.mark.parametrize(
+    "event_name", ["relation_changed", "leader_elected", "upgrade_charm", "cache_recovery"]
+)
+def test_publication_scope_local_bag_access_and_full_remote_scan(monkeypatch, event_name):
+    """Source churn targets its own publication; global recovery still visits every source."""
+    from ops.model import RelationData
+
+    sources = [
+        testing.Relation(
+            "receive-remote-write",
+            remote_app_name=f"source-{i}",
+            remote_app_data={"alert_rules": "malformed" if i else '{"groups": []}'},
+        )
+        for i in range(2)
+    ]
+    local_ids = set()
+    remote_ids = set()
+    original = RelationData.__getitem__
+
+    def observe(data, entity):
+        if data.relation.id in {r.id for r in sources}:
+            if entity.name.startswith("source-"):
+                remote_ids.add(data.relation.id)
+            else:
+                local_ids.add(data.relation.id)
+        return original(data, entity)
+
+    monkeypatch.setattr(RelationData, "__getitem__", observe)
+    monkeypatch.setattr(MimirGatewayVmCharm, "_configure", lambda *args: True)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    ctx = _context()
+    event = (
+        ctx.on.relation_changed(sources[0])
+        if event_name in {"relation_changed", "cache_recovery"}
+        else getattr(ctx.on, event_name)()
+    )
+    relations: list[testing.Relation | testing.PeerRelation] = list(sources)
+    if event_name == "cache_recovery":
+        relations.append(
+            testing.PeerRelation("gateway-peers", local_app_data={CACHE_KEY: "broken"})
+        )
+    result = ctx.run(
+        event, testing.State(relations=relations, leader=True, unit_status=testing.ActiveStatus())
+    )
+    assert local_ids == (
+        {sources[0].id} if event_name == "relation_changed" else {r.id for r in sources}
+    )
+    assert remote_ids == {r.id for r in sources}
+    assert result.unit_status.name == "waiting"
+    assert "rejected=1" in result.unit_status.message
+
+
+@pytest.mark.parametrize("previous_url", ["http://10.0.0.20:80/api/v1/push", "http://old", None])
+@pytest.mark.parametrize("leader", [True, False])
+def test_source_joined_endpoint_scope_and_global_rotation_fallback(
+    monkeypatch, previous_url, leader
+):
+    from ops.model import RelationData
+
+    monkeypatch.setattr(
+        MimirGatewayVmCharm, "_external_url_base", lambda self: "http://10.0.0.20:80"
+    )
+    monkeypatch.setattr(MimirGatewayVmCharm, "_configure", lambda *args: True)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    first = replace(
+        _remote_write_relation(),
+        local_unit_data={"remote_write": json.dumps({"url": previous_url})}
+        if previous_url
+        else {},
+    )
+    second = replace(
+        _remote_write_relation(), local_unit_data={"remote_write": '{"url":"http://other"}'}
+    )
+    touched = set()
+    original = RelationData.__getitem__
+
+    def spy(data, entity):
+        if data.relation.id in {first.id, second.id} and entity.name in {
+            "mimir-gateway-vm",
+            "mimir-gateway-vm/0",
+        }:
+            touched.add(data.relation.id)
+        return original(data, entity)
+
+    monkeypatch.setattr(RelationData, "__getitem__", spy)
+    ctx = _context()
+    state = ctx.run(
+        ctx.on.relation_joined(first, remote_unit=0),
+        testing.State(relations=[_backend_relation(), first, second], leader=leader),
+    )
+    scoped = previous_url == "http://10.0.0.20:80/api/v1/push"
+    assert touched == ({first.id} if scoped else {first.id, second.id})
+    assert json.loads(state.get_relation(second.id).local_unit_data["remote_write"])["url"] == (
+        "http://other" if scoped else "http://10.0.0.20:80/api/v1/push"
+    )
+
+
+@pytest.mark.parametrize("event_name", ["config_changed", "upgrade_charm", "backend_changed"])
+def test_global_events_rotate_all_source_endpoints(monkeypatch, event_name):
+    monkeypatch.setattr(MimirGatewayVmCharm, "_external_url_base", lambda self: "http://new:80")
+    monkeypatch.setattr(MimirGatewayVmCharm, "_configure", lambda *args: True)
+    monkeypatch.setattr("charm.traefik.is_active", lambda: True)
+    sources = [
+        replace(_remote_write_relation(), local_unit_data={"remote_write": '{"url":"http://old"}'})
+        for _ in range(2)
+    ]
+    backend = _backend_relation()
+    ctx = _context()
+    event = (
+        ctx.on.relation_changed(backend)
+        if event_name == "backend_changed"
+        else getattr(ctx.on, event_name)()
+    )
+    result = ctx.run(event, testing.State(relations=[backend, *sources], leader=True))
+    assert result.unit_status.name == "active"
+    for source in sources:
+        assert json.loads(result.get_relation(source.id).local_unit_data["remote_write"]) == {
+            "url": "http://new:80/api/v1/push"
+        }
+
+
+@pytest.mark.parametrize("phase", ["endpoint", "capability"])
+def test_removed_event_source_falls_back_without_accessing_removed_bag(monkeypatch, phase):
+    from ops.model import RelationData
+
+    monkeypatch.setattr(MimirGatewayVmCharm, "_external_url_base", lambda self: "http://new:80")
+    harness = testing.Harness(MimirGatewayVmCharm)
+    harness.set_leader(True)
+    harness.begin()
+    harness.disable_hooks()
+    active = [harness.add_relation("receive-remote-write", f"source-{i}") for i in range(2)]
+    removed_id = harness.add_relation("receive-remote-write", "removed")
+    removed = harness.model.get_relation("receive-remote-write", removed_id)
+    harness.remove_relation(removed_id)
+    touched = set()
+    original = RelationData.__getitem__
+
+    def spy(data, entity):
+        assert data.relation.id != removed_id, "Removed event relation must not be accessed"
+        if data.relation.id in active and entity.name in {
+            harness.charm.app.name,
+            harness.charm.unit.name,
+        }:
+            touched.add(data.relation.id)
+        return original(data, entity)
+
+    monkeypatch.setattr(RelationData, "__getitem__", spy)
+    if phase == "endpoint":
+        harness.charm._publish_consumer_data(source_relation=removed)
+    else:
+        harness.charm.rule_bridge.reconcile(source_relation=removed)
+    assert touched == set(active)
+    harness.cleanup()
+
+
+@pytest.mark.parametrize("committed_cache", ["valid", "corrupt"])
+def test_follower_recovers_on_peer_cache_change_without_app_writes(monkeypatch, committed_cache):
+    """A leader commit completes source-before-cache delivery without waiting for a timer."""
+    ctx = _context()
+    group = {"name": "follower", "rules": [{"alert": "Follower", "expr": "up"}]}
+    source = testing.Relation(
+        "receive-remote-write",
+        remote_app_name="alloy",
+        remote_app_data={"alert_rules": json.dumps({"groups": [group]})},
+    )
+    destination = testing.Relation("mimir-alert-rules", remote_app_name="mimir")
+    peers = testing.PeerRelation("gateway-peers", peers_data={1: {}})
+    initial = ctx.run(
+        ctx.on.relation_changed(source),
+        testing.State(
+            relations=[source, destination, peers],
+            leader=True,
+            unit_status=testing.ActiveStatus("gateway ready"),
+        ),
+    )
+    source = replace(
+        initial.get_relation(source.id),
+        remote_app_data={"alert_rules": json.dumps({"groups": [{**group, "name": "new-source"}]})},
+    )
+    relations = [source, initial.get_relation(destination.id), initial.get_relation(peers.id)]
+    follower = ctx.run(
+        ctx.on.relation_changed(source), replace(initial, leader=False, relations=relations)
+    )
+    assert follower.unit_status.name == "waiting"
+    assert "pending=True" in follower.unit_status.message
+    leader = ctx.run(ctx.on.relation_changed(source), replace(initial, relations=relations))
+    committed = leader.get_relation(peers.id)
+    if committed_cache == "corrupt":
+        committed = replace(committed, local_app_data={CACHE_KEY: "corrupt-cache"})
+    before = [follower.get_relation(source.id), follower.get_relation(destination.id), committed]
+    recovered = ctx.run(
+        ctx.on.relation_changed(committed, remote_unit=1), replace(follower, relations=before)
+    )
+    assert recovered.unit_status.name == ("active" if committed_cache == "valid" else "waiting")
+    for relation in before:
+        assert recovered.get_relation(relation.id).local_app_data == relation.local_app_data

@@ -27,13 +27,13 @@ writer and does not alter rule expressions, names, or labels.
 ## Desired state and resilience
 
 Upstreams are deterministically ordered by relation ID and group name. Their
-application databags are complete desired state, so empty input and relation
+application databags are complete desired state, so explicitly empty rules and relation
 removal withdraw ownership. Malformed first input is skipped; later malformed
 input retains only that relation's LKG while unrelated valid changes proceed.
 
 A compressed peer application databag stores bounded per-relation snapshots
 and the last rendered aggregate for leader failover and upgrade replay. Limits
-cover 32 source relations, relation value size, decoded cache size, tree depth,
+cover aggregate rule bytes, relation value size, decoded cache size, tree depth,
 node count, and group-name bytes. Aggregate overflow keeps the prior accepted
 snapshot, including when a new destination appears.
 
