@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from charms.dwellir_observability.v0 import alert_rule_transport as transport
+from cosl import LZMABase64
 from ops import testing
 from ops.testing import PeerRelation, Relation
 
@@ -199,7 +199,7 @@ def test_remote_write_relation_clears_legacy_gateway_metadata(monkeypatch):
     )
     state = ctx.run(ctx.on.start(), testing.State(relations=[backend, relation], leader=True))
     relation_out = state.get_relation(relation.id)
-    assert relation_out.local_app_data == {transport.ENCODINGS_KEY: transport.ENCODINGS}
+    assert relation_out.local_app_data == {"alert_rules_encodings": '["lzma", "json"]'}
     assert (
         relation_out.local_unit_data["remote_write"]
         == '{"url": "http://10.0.0.20:80/api/v1/push"}'
@@ -804,7 +804,7 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
     ]
     destination = _rule_destination_relation()
     destination = replace(
-        destination, remote_app_data={transport.ENCODINGS_KEY: transport.ENCODINGS}
+        destination, remote_app_data={"alert_rules_encodings": '["lzma", "json"]'}
     )
     peers = _peer_relation()
     monkeypatch.setattr("charm.traefik.get_version", lambda: None)
@@ -815,7 +815,7 @@ def test_peer_cache_and_source_admission_are_deterministically_bounded(monkeypat
     )
 
     groups = json.loads(
-        transport.decode(state.get_relation(destination.id).local_app_data["alert_rules"])
+        LZMABase64.decompress(state.get_relation(destination.id).local_app_data["alert_rules"])
     )["groups"]
     admitted = sorted(sources, key=lambda item: item.id)
     admitted_names = {source.remote_app_name for source in admitted}

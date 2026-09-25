@@ -6,16 +6,39 @@ import base64
 import binascii
 import json
 import logging
+import lzma
 import math
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from charms.dwellir_observability.v0 import alert_rule_transport as transport
-from charms.dwellir_observability.v0 import source_admission
+from cosl import LZMABase64
 
 logger = logging.getLogger(__name__)
+
+MAX_RULE_BYTES = 8 * 1024 * 1024
+
+
+def _decompress_rules(raw: str, *, maximum: int = MAX_RULE_BYTES) -> bytes:
+    """Decode exactly one XZ stream with bounded output and dictionary memory."""
+    try:
+        decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=64 * 1024 * 1024)
+        result = decoder.decompress(base64.b64decode(raw, validate=True), max_length=maximum + 1)
+        if len(result) > maximum or not decoder.eof or decoder.unused_data:
+            raise ValueError("compressed rules exceed bounds or contain trailing data")
+        return result
+    except (binascii.Error, lzma.LZMAError, UnicodeError) as exc:
+        raise ValueError("invalid compressed rules") from exc
+
+
+def _rule_text(raw: str) -> str:
+    """Accept legacy JSON and Canonical bare or JSON-wrapped XZ/base64."""
+    value = json.loads(raw) if raw.strip().startswith('"') else raw.strip()
+    if isinstance(value, str) and value.startswith("/Td6WFoA"):
+        return _decompress_rules(value).decode("utf-8")
+    return raw
+
 
 RELATION_VALUE_LIMIT = 60 * 1024
 CACHE_KEY = "_mimir_rule_bridge_state_v1"
@@ -152,13 +175,15 @@ def _parse_rule_groups(raw: str, *, max_nodes: int) -> list[dict[str, Any]]:
         raise InvalidRuleDocumentError("relation value exceeds the safe size limit")
     try:
         document = json.loads(
-            transport.decode(raw, wire_limit=RELATION_VALUE_LIMIT),
+            _rule_text(raw),
             object_pairs_hook=_unique_object,
             parse_constant=_reject_json_constant,
         )
     except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
         raise InvalidRuleDocumentError("relation value is not valid bounded JSON") from exc
     _validate_tree(document, max_nodes=max_nodes)
+    if document == {}:
+        return []
     if not isinstance(document, dict) or set(document) != {"groups"}:
         raise InvalidRuleDocumentError("rule document must contain only groups")
     groups = document["groups"]
@@ -183,7 +208,7 @@ def merge_rule_groups(snapshots: Mapping[int, list[dict[str, Any]]]) -> list[dic
 def serialize_rule_groups(groups: list[dict[str, Any]]) -> str:
     """Serialize merged groups compactly and reject values unsafe for a Juju databag."""
     rendered = json.dumps({"groups": groups}, sort_keys=True, separators=(",", ":"))
-    if len(rendered.encode("utf-8")) > transport.DECODED_LIMIT:
+    if len(rendered.encode("utf-8")) > MAX_RULE_BYTES:
         raise InvalidRuleDocumentError("merged rules exceed the safe size limit")
     return rendered
 
@@ -200,7 +225,7 @@ def _decompress_cache(encoded: str) -> bytes:
         raise InvalidRuleCacheError("cache value exceeds the safe size limit")
     if encoded.startswith("xz:"):
         try:
-            return transport.decompress(encoded[3:], maximum=CACHE_DECODED_LIMIT)
+            return _decompress_rules(encoded[3:], maximum=CACHE_DECODED_LIMIT)
         except ValueError as exc:
             raise InvalidRuleCacheError("invalid compressed cache") from exc
     try:
@@ -251,11 +276,11 @@ def _decode_cache(encoded: str) -> _RuleCache:
         ):
             raise InvalidRuleCacheError("cache relation identifier is invalid")
         try:
+            serialized = json.dumps({"groups": groups}, sort_keys=True, separators=(",", ":"))
             snapshots[int(raw_relation_id)] = parse_rule_groups(
-                transport.encode(
-                    json.dumps({"groups": groups}, sort_keys=True, separators=(",", ":")),
-                    {transport.ENCODINGS_KEY: transport.ENCODINGS},
-                )
+                serialized
+                if len(serialized.encode("utf-8")) < RELATION_VALUE_LIMIT
+                else LZMABase64.compress(serialized)
             )
         except ValueError as exc:
             raise InvalidRuleCacheError("cache relation snapshot is invalid") from exc
@@ -264,9 +289,9 @@ def _decode_cache(encoded: str) -> _RuleCache:
     try:
         accepted = serialize_rule_groups(
             _parse_rule_groups(
-                transport.encode(
-                    document["accepted"], {transport.ENCODINGS_KEY: transport.ENCODINGS}
-                ),
+                document["accepted"]
+                if len(document["accepted"].encode("utf-8")) < RELATION_VALUE_LIMIT
+                else LZMABase64.compress(document["accepted"]),
                 max_nodes=MAX_AGGREGATE_NODES,
             )
         )
@@ -299,7 +324,7 @@ def _encode_cache(cache: _RuleCache) -> str:
     ).encode("utf-8")
     if len(raw) > CACHE_DECODED_LIMIT:
         raise InvalidRuleCacheError("cache decoded content exceeds safe bounds")
-    encoded = "xz:" + transport.compress(raw)
+    encoded = "xz:" + LZMABase64.compress(raw.decode("utf-8"))
     if len(encoded.encode("utf-8")) >= CACHE_VALUE_LIMIT:
         raise InvalidRuleCacheError("cache value exceeds the safe size limit")
     return encoded
@@ -347,7 +372,7 @@ class PrometheusRuleBridge:
         peer.data[self._charm.app][CACHE_KEY] = encoded
         return True
 
-    def reconcile(
+    def reconcile(  # noqa: C901 - retain source admission beside its transaction.
         self,
         *,
         excluded_relation_id: int | None = None,
@@ -364,11 +389,38 @@ class PrometheusRuleBridge:
             ),
             key=lambda relation: relation.id,
         )
-        snapshots, errors = source_admission.admit(
-            [(r.id, r.data[r.app].get("alert_rules")) for r in current_relations],
-            previous.snapshots,
-            parse_rule_groups,
-        )
+        current = {r.id: r.data[r.app].get("alert_rules") for r in current_relations}
+        snapshots = {
+            key: groups for key, groups in previous.snapshots.items() if key in current and groups
+        }
+        errors: list[int] = []
+        sizes = {
+            key: len(json.dumps(groups, ensure_ascii=False).encode())
+            for key, groups in snapshots.items()
+        }
+        total = sum(sizes.values())
+        # Existing ownership is considered before newcomers; source count is not a budget.
+        for key in sorted(current, key=lambda key: (key not in snapshots, key)):
+            raw = current[key]
+            if raw is None:
+                continue
+            try:
+                groups = parse_rule_groups(raw)
+            except ValueError:
+                errors.append(key)
+                continue
+            size = len(json.dumps(groups, ensure_ascii=False).encode()) if groups else 0
+            candidate_total = total - sizes.get(key, 0) + size
+            if candidate_total > MAX_RULE_BYTES:
+                errors.append(key)
+                continue
+            if groups:
+                snapshots[key] = groups
+                sizes[key] = size
+            else:
+                snapshots.pop(key, None)
+                sizes.pop(key, None)
+            total = candidate_total
         publication_relations = current_relations
         if source_relation is not None and previous.valid:
             selected = [r for r in current_relations if r.id == source_relation.id]
@@ -410,7 +462,7 @@ class PrometheusRuleBridge:
         try:
             for relation in destinations:
                 remote = relation.data[relation.app] if relation.app else {}
-                transport.encode(accepted, remote)
+                self._destination_payload(accepted, remote)
         except ValueError:
             accepted = previous.accepted
             pending = True
@@ -432,6 +484,25 @@ class PrometheusRuleBridge:
             pending=pending,
         )
 
+    def _destination_payload(self, accepted: str, remote: Mapping[str, str]) -> str:
+        """Render the accepted aggregate for one receiver's advertised capability."""
+        try:
+            encodings = json.loads(remote.get("alert_rules_encodings", "[]"))
+        except (ValueError, TypeError):
+            encodings = []
+        payload = (
+            LZMABase64.compress(accepted)
+            if isinstance(encodings, list) and "lzma" in encodings
+            else accepted
+        )
+        if len(accepted.encode("utf-8")) > MAX_RULE_BYTES:
+            raise ValueError("rules exceed decoded capacity")
+        if len(payload.encode("utf-8")) >= RELATION_VALUE_LIMIT:
+            payload = accepted
+        if len(payload.encode("utf-8")) >= RELATION_VALUE_LIMIT:
+            raise ValueError("rules exceed receiver capacity")
+        return payload
+
     def _publish(self, destinations: list[Any], accepted: str) -> bool:
         """Publish to negotiated peers, retaining their old value on size failure."""
         pending = False
@@ -439,7 +510,7 @@ class PrometheusRuleBridge:
             for relation in destinations:
                 remote = relation.data[relation.app] if relation.app else {}
                 try:
-                    payload = transport.encode(accepted, remote)
+                    payload = self._destination_payload(accepted, remote)
                 except ValueError:
                     pending = True
                     logger.warning(
@@ -453,4 +524,4 @@ class PrometheusRuleBridge:
         """Negotiate reception independently from downstream peer capabilities."""
         if self._charm.unit.is_leader():
             for relation in current_relations:
-                relation.data[self._charm.app][transport.ENCODINGS_KEY] = transport.ENCODINGS
+                relation.data[self._charm.app]["alert_rules_encodings"] = '["lzma", "json"]'

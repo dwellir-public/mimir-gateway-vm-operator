@@ -4,7 +4,7 @@ import json
 import uuid
 
 import pytest
-from charms.dwellir_observability.v0 import alert_rule_transport as transport
+from cosl import LZMABase64
 
 
 def _corpus(count=1024, rules=4):
@@ -57,9 +57,9 @@ def test_source_corpus_preserves_all_groups_and_topology_through_wire_and_cache(
     groups = [group for values in snapshots.values() for group in values]
     raw = json.dumps({"groups": groups}, sort_keys=True)
     assert len(raw.encode()) > 60 * 1024
-    packed = transport.encode(raw, {transport.ENCODINGS_KEY: transport.ENCODINGS})
+    packed = LZMABase64.compress(raw)
     assert len(packed) < 60 * 1024
-    assert json.loads(transport.decode(packed))["groups"] == groups
+    assert json.loads(LZMABase64.decompress(packed))["groups"] == groups
     import rule_bridge as module
 
     accepted = module.serialize_rule_groups(module.merge_rule_groups(snapshots))
@@ -97,8 +97,8 @@ def test_invalid_cache_and_malformed_source_never_withdraw_downstream_rules():
 
 def test_high_entropy_2048_source_document_reports_wire_capacity():
     groups = [group for values in _corpus(2048, 1).values() for group in values]
-    with pytest.raises(ValueError, match="receiver capacity"):
-        transport.encode(
-            json.dumps({"groups": groups}, sort_keys=True),
-            {transport.ENCODINGS_KEY: transport.ENCODINGS},
-        )
+    import rule_bridge as module
+
+    packed = LZMABase64.compress(json.dumps({"groups": groups}, sort_keys=True))
+    with pytest.raises(ValueError):
+        module.parse_rule_groups(packed)

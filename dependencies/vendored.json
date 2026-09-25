@@ -1,0 +1,19 @@
+[
+  {
+    "path": "lib/charms/prometheus_k8s/v1/prometheus_remote_write.py",
+    "sha256": "33c1522ce3509c3f81ad74631165977c7a67a0630bbf668eee71551b29fa8362",
+    "library": {
+      "LIBID": "f783823fa75f4b7880eb70f2077ec259",
+      "LIBAPI": 1,
+      "LIBPATCH": 12
+    },
+    "scope": "runtime",
+    "upstream_path": "lib/charms/prometheus_k8s/v1/prometheus_remote_write.py",
+    "repository": "https://github.com/dwellir-public/alloy-vm-operator",
+    "commit": "9686a0230b5c2e6442de5956398d39ddb0403741",
+    "license": "Apache-2.0",
+    "upstream_owner_repository": "https://github.com/canonical/prometheus-k8s-operator",
+    "upstream_base_commit": "4b3d229c3021ce01a2b569b06a74204a76ecf177",
+    "modifications": "Adds tenant-id, application, model, model_uuid relation metadata; removes deepcopy around generic aggregator rules."
+  }
+]
