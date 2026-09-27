@@ -1,0 +1,14 @@
+{
+  "cosl": {
+    "repository": "https://github.com/canonical/cos-lib",
+    "role": "runtime",
+    "distribution": "cosl",
+    "source_path": "src/cosl"
+  },
+  "prometheus_remote_write": {
+    "repository": "https://github.com/canonical/prometheus-k8s-operator",
+    "role": "runtime-vendored",
+    "source_path": "lib/charms/prometheus_k8s/v1/prometheus_remote_write.py",
+    "distribution": null
+  }
+}

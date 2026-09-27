@@ -92,7 +92,7 @@ def test_serialize_is_compact_sorted_and_round_trips():
 
 
 def test_serialize_rejects_aggregate_at_ceiling():
-    groups = [_group("principal", "x" * RELATION_VALUE_LIMIT)]
+    groups = [_group("principal", "x" * (8 * 1024 * 1024 + 1))]
 
     with pytest.raises(InvalidRuleDocumentError, match="size"):
         serialize_rule_groups(groups)

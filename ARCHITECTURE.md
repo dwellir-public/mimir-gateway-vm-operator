@@ -19,6 +19,13 @@ rather than free-form host config.
 installation, config-file writes, and service lifecycle are isolated in
 Juju-independent helper modules so they can be unit tested directly.
 
+`src/rule_bridge.py` owns alert-source caches, byte-budget admission and downstream
+publication. It negotiates JSON/LZMA encoding and uses the public Canonical
+`cosl.LZMABase64` compressor. A small private stdlib decoder bounds untrusted
+XZ dictionary memory and output, rejecting incomplete or trailing streams.
+Source retention stays inside the bridge transaction; no shared adapter owner
+checkout or synchronized source manifest is required.
+
 ## Integrations
 
 - `backend`: supplies one or more Mimir backend URLs
@@ -42,3 +49,23 @@ The workload distribution class is direct artifact download. Charm upgrades may
 update orchestration logic independently of the installed Traefik version.
 Workload upgrade and recovery behavior will be implemented through explicit
 download, render, and restart flows.
+
+
+Follower rule readiness uses the leader-owned peer cache. A follower waits when
+its current source candidate differs from the committed cache, and considers a
+matching cache ready without attempting a write. Downstream publication remains
+the leader's responsibility: Ops does not allow followers to read their own
+application databag on non-peer relations. Follower readiness therefore does not
+independently prove delivery to the ruler.
+
+### Publication during source events
+
+Source events advertise rule encodings only on the active source relation, while
+rule admission still reads every source and reconciles the full accepted snapshot.
+Endpoint publication can target an existing source when its published unit URL
+already matches the current frontend. A missing or changed URL uses global
+publication, as do configuration, backend/ingress and upgrade recovery paths.
+Leadership still republishes capabilities and accepted rules globally. This
+conservative fallback avoids adding frontend state; newly joined sources may
+still require a full endpoint publication pass. Followers publish only their own
+unit endpoints; application data remains leader-owned.
