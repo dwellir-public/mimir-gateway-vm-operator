@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import ops
 from cosl import LZMABase64
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class RuleBridgeResult:
     pending: bool = False
     received_sources: int = 0
     accepted_sources: int = 0
+    unavailable_sources: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -385,11 +387,13 @@ class PrometheusRuleBridge:
             (
                 relation
                 for relation in self._charm.model.relations.get("receive-remote-write", [])
-                if relation.id != excluded_relation_id and relation.app is not None
+                if relation.id != excluded_relation_id
+                and relation.active
+                and relation.app is not None
             ),
             key=lambda relation: relation.id,
         )
-        current = {r.id: r.data[r.app].get("alert_rules") for r in current_relations}
+        current, unavailable = self._read_sources(current_relations)
         snapshots = {
             key: groups for key, groups in previous.snapshots.items() if key in current and groups
         }
@@ -421,20 +425,18 @@ class PrometheusRuleBridge:
                 snapshots.pop(key, None)
                 sizes.pop(key, None)
             total = candidate_total
-        publication_relations = current_relations
+        publication_relations = [r for r in current_relations if r.id not in unavailable]
         if source_relation is not None and previous.valid:
-            selected = [r for r in current_relations if r.id == source_relation.id]
-            publication_relations = selected or current_relations
-        self._advertise(publication_relations)
+            selected = [r for r in publication_relations if r.id == source_relation.id]
+            publication_relations = selected or publication_relations
+        unavailable.extend(self._advertise(publication_relations))
         if errors:
             for offset in range(0, len(errors), 16):
                 logger.warning(
                     "Rule sources rejected or over capacity: %s", errors[offset : offset + 16]
                 )
 
-        if not previous.valid and (
-            errors or any(r.data[r.app].get("alert_rules") is None for r in current_relations)
-        ):
+        if not previous.valid and (errors or any(raw is None for raw in current.values())):
             logger.warning(
                 "Cannot reconstruct rule ownership from invalid cache and incomplete sources"
             )
@@ -445,6 +447,7 @@ class PrometheusRuleBridge:
                 pending=True,
                 received_sources=len(current_relations),
                 accepted_sources=0,
+                unavailable_sources=tuple(sorted(set(unavailable))),
             )
 
         destinations = [
@@ -453,7 +456,7 @@ class PrometheusRuleBridge:
             if relation.id != excluded_destination_id
         ]
         accepted = previous.accepted
-        pending = False
+        pending = bool(unavailable)
         try:
             accepted = serialize_rule_groups(merge_rule_groups(snapshots))
         except InvalidRuleDocumentError as exc:
@@ -482,7 +485,23 @@ class PrometheusRuleBridge:
             received_sources=len(current_relations),
             accepted_sources=len(snapshots),
             pending=pending,
+            unavailable_sources=tuple(sorted(set(unavailable))),
         )
+
+    def _read_sources(self, relations: list[Any]) -> tuple[dict[int, str | None], list[int]]:
+        """Keep last accepted ownership when Juju cannot read a source during teardown."""
+        current: dict[int, str | None] = {}
+        unavailable = []
+        for relation in relations:
+            try:
+                current[relation.id] = relation.data[relation.app].get("alert_rules")
+            except ops.ModelError as exc:
+                logger.warning(
+                    "Cannot read rule source %s; retaining accepted rules: %s", relation.id, exc
+                )
+                current[relation.id] = None
+                unavailable.append(relation.id)
+        return current, unavailable
 
     def _destination_payload(self, accepted: str, remote: Mapping[str, str]) -> str:
         """Render the accepted aggregate for one receiver's advertised capability."""
@@ -520,8 +539,14 @@ class PrometheusRuleBridge:
                 relation.data[self._charm.app]["alert_rules"] = payload
         return pending
 
-    def _advertise(self, current_relations: list[Any]) -> None:
+    def _advertise(self, current_relations: list[Any]) -> list[int]:
         """Negotiate reception independently from downstream peer capabilities."""
+        unavailable = []
         if self._charm.unit.is_leader():
             for relation in current_relations:
-                relation.data[self._charm.app]["alert_rules_encodings"] = '["lzma", "json"]'
+                try:
+                    relation.data[self._charm.app]["alert_rules_encodings"] = '["lzma", "json"]'
+                except ops.ModelError as exc:
+                    logger.warning("Cannot advertise to rule source %s: %s", relation.id, exc)
+                    unavailable.append(relation.id)
+        return unavailable

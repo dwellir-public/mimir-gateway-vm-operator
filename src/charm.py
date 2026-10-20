@@ -138,6 +138,10 @@ class MimirGatewayVmCharm(ops.CharmBase):
         )
         self._reconcile(
             excluded_rule_relation_id=excluded_rule_relation_id,
+            publish_endpoints=not (
+                isinstance(event, (ops.RelationDepartedEvent, ops.RelationBrokenEvent))
+                and event.relation.name == "receive-remote-write"
+            ),
             source_relation=(
                 event.relation
                 if isinstance(event, ops.RelationEvent)
@@ -161,10 +165,12 @@ class MimirGatewayVmCharm(ops.CharmBase):
         self._set_workload_version()
         app_name = event.app.name if event.app is not None else ""
         unit_name = event.unit.name if event.unit is not None else ""
-        app_keys = sorted(event.relation.data[event.app].keys()) if event.app is not None else []
-        unit_keys = (
-            sorted(event.relation.data[event.unit].keys()) if event.unit is not None else []
-        )
+        try:
+            app_keys = sorted(event.relation.data[event.app]) if event.app is not None else []
+            unit_keys = sorted(event.relation.data[event.unit]) if event.unit is not None else []
+        except ops.ModelError as exc:
+            logger.warning("Cannot inspect remote-write source %s: %s", event.relation.id, exc)
+            app_keys, unit_keys = [], []
         logger.info(
             "Ignoring remote-write consumer data change for relation %s: "
             "remote_app=%s remote_unit=%s app_data_keys=%s unit_data_keys=%s",
@@ -181,6 +187,7 @@ class MimirGatewayVmCharm(ops.CharmBase):
         *,
         excluded_rule_relation_id: int | None = None,
         source_relation: ops.Relation | None = None,
+        publish_endpoints: bool = True,
     ) -> None:
         """Converge gateway routing, published endpoints, rules, and workload status."""
         try:
@@ -190,10 +197,11 @@ class MimirGatewayVmCharm(ops.CharmBase):
             if not self._configure(backend_urls):
                 return
             self._set_workload_version()
-            if source_relation is None:
-                self._publish_consumer_data()
-            else:
-                self._publish_consumer_data(source_relation=source_relation)
+            if publish_endpoints:
+                if source_relation is None:
+                    self._publish_consumer_data()
+                else:
+                    self._publish_consumer_data(source_relation=source_relation)
             self._refresh_status()
         finally:
             self._reconcile_rules(
@@ -230,6 +238,11 @@ class MimirGatewayVmCharm(ops.CharmBase):
                     "Alert rule delivery incomplete; "
                     f"rejected={len(result.errors)} sources={result.errors[:8]}; "
                     f"pending={result.pending}"
+                    + (
+                        f"; unavailable={result.unavailable_sources[:8]}"
+                        if result.unavailable_sources
+                        else ""
+                    )
                 )
             return
         if isinstance(self.unit.status, ops.WaitingStatus) and self.unit.status.message.startswith(
@@ -264,7 +277,8 @@ class MimirGatewayVmCharm(ops.CharmBase):
         return BackendState(urls=urls)
 
     def _remote_write_relations(self) -> list[ops.Relation]:
-        return list(self.model.relations.get("receive-remote-write", []))
+        """Return live consumers, excluding relations Juju has confirmed gone."""
+        return [r for r in self.model.relations.get("receive-remote-write", []) if r.active]
 
     def _relation_route_name(self, relation: ops.Relation) -> str:
         return f"relation-{relation.id}"
@@ -351,7 +365,7 @@ class MimirGatewayVmCharm(ops.CharmBase):
             expected = {"url": self._relation_write_url(source_relation)}
             try:
                 previous = json.loads(source_relation.data[self.unit].get("remote_write", ""))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, ops.ModelError):
                 previous = None
             if previous != expected:
                 source_relation = None

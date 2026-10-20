@@ -20,6 +20,11 @@ uv run ruff check src tests
 uv run pyright
 ```
 
+The unit tox environment installs the runtime and unit dependency group from
+`uv.lock`, so rule-compression checks use the same library versions as the built
+charm. Update dependency declarations and the lock together when testing newer
+libraries.
+
 ## Integration test artifacts
 
 The integration test deploys local charm artifacts for:
@@ -35,6 +40,37 @@ By default it looks for:
 - `../alloy-vm-operator/alloy-vm_ubuntu@24.04-amd64.charm`
 
 Override those paths with `CHARM_PATH`, `MIMIR_CHARM_PATH`, or `ALLOY_CHARM_PATH`.
+
+## Retained-model lifecycle regression
+
+The lifecycle test refreshes an existing gateway with a built local artifact.
+It requires an explicitly authorized nonproduction model, its UUID, and the
+opt-in below. It preserves existing applications and integrations, and leaves
+the gateway running the tested artifact. It creates a workload-free source on
+two existing machines and a temporary consumer model on the same controller.
+Cleanup removes only those test resources; it never destroys the retained model.
+
+Build both artifacts, then supply the target identity from `juju show-model`:
+
+```bash
+charmcraft pack --use-lxd
+charmcraft pack --project-dir tests/integration/charms/rule-source --use-lxd
+
+TEST_MODEL=<controller>:<owner>/<test-model> \
+TEST_MODEL_UUID=<model-uuid> \
+ALLOW_RETAINED_MODEL_TESTS=1 \
+CHARM_PATH=./mimir-gateway-vm_amd64.charm \
+RULE_SOURCE_CHARM_PATH=./tests/integration/charms/rule-source/gateway-lifecycle-source_amd64.charm \
+uv run pytest tests/integration/test_relation_lifecycle.py -v -s
+```
+
+Set `GATEWAY_APP` if the application has a different name; its existing offer
+must use the same name. The gateway needs a backend, an alert-rule destination,
+an existing consumer, and an accessible Mimir ruler API. The test verifies rules
+through that API, removes one unit from a two-unit consumer, and removes and
+recreates a cross-model consumer while another source updates. It also checks
+that the Traefik process and start timestamp survive refresh and relation churn.
+Other integration tests retain their existing temporary-model workflow.
 
 ## Reference repos
 

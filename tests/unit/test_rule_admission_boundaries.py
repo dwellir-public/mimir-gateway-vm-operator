@@ -25,6 +25,7 @@ def run_receiver():
         relations["receive-remote-write"] = [
             SimpleNamespace(
                 id=key,
+                active=True,
                 app=remote,
                 data={remote: {} if raw is None else {"alert_rules": raw}, app: {}},
             )
