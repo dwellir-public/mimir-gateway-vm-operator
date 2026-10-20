@@ -75,7 +75,9 @@ def test_invalid_cache_and_malformed_source_never_withdraw_downstream_rules():
     import rule_bridge as module
 
     app, remote = object(), object()
-    source = SimpleNamespace(id=1, app=remote, data={remote: {"alert_rules": "broken"}, app: {}})
+    source = SimpleNamespace(
+        id=1, active=True, app=remote, data={remote: {"alert_rules": "broken"}, app: {}}
+    )
     accepted = '{"groups":[{"name":"existing","rules":[]}]}'
     destination = SimpleNamespace(
         id=2, app=remote, data={remote: {}, app: {"alert_rules": accepted}}

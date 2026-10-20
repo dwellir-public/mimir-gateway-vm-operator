@@ -69,3 +69,19 @@ Leadership still republishes capabilities and accepted rules globally. This
 conservative fallback avoids adding frontend state; newly joined sources may
 still require a full endpoint publication pass. Followers publish only their own
 unit endpoints; application data remains leader-owned.
+
+### Source removal and temporarily unavailable data
+
+Remote-write departed and broken events reconcile routing and rules without
+republishing frontend endpoints. A unit departure retains the application's
+rules while the integration remains; a broken or confirmed inactive integration
+withdraws that source's rule ownership.
+
+Juju may still list a cross-model integration after its application data becomes
+inaccessible. Each source read and capability publication handles Juju model
+errors independently, so other consumers can continue updating. An unreadable
+source retains its last accepted rules until it becomes readable or is confirmed
+removed. The gateway reports waiting with the unavailable integration IDs and
+logs the access error, rather than treating unavailable data as an empty rule
+document. An invalid cache and incomplete source data leave downstream rules
+unchanged until ownership can be reconstructed.

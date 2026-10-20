@@ -1,0 +1,27 @@
+type: charm
+name: gateway-lifecycle-source
+title: Gateway lifecycle test source
+summary: Publish synthetic alert rules for gateway integration tests.
+description: Test fixture that publishes rules without installing a workload.
+base: ubuntu@24.04
+platforms:
+  amd64:
+parts:
+  charm:
+    plugin: uv
+    source: .
+    build-snaps:
+      - astral-uv
+requires:
+  send-remote-write:
+    interface: prometheus_remote_write
+config:
+  options:
+    rule-name:
+      type: string
+      default: lifecycle
+      description: Unique name for this test source's rule group.
+    generation:
+      type: int
+      default: 0
+      description: Change to trigger publication during another source's removal.

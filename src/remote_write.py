@@ -1,11 +1,13 @@
 """Provider-side helpers for prometheus remote-write publication."""
 
 import json
+import logging
 
 import ops
 
 LEGACY_METADATA_KEYS = ("tenant-id", "application", "model", "model_uuid")
 ALERT_RULES_KEY = "alert_rules"
+logger = logging.getLogger(__name__)
 
 
 class RemoteWriteProvider:
@@ -23,19 +25,23 @@ class RemoteWriteProvider:
             selected = [current for current in relations if current.id == relation.id]
             relations = selected or relations
         for current in relations:
-            if self._charm.unit.is_leader():
-                for key in LEGACY_METADATA_KEYS:
-                    current.data[self._charm.app].pop(key, None)
-            url = relation_urls.get(current.id)
-            if url is None:
-                current.data[self._charm.unit].pop("remote_write", None)
+            if not current.active:
                 continue
-            current.data[self._charm.unit]["remote_write"] = json.dumps({"url": url})
+            try:
+                self._publish_relation(current, relation_urls.get(current.id))
+            except ops.ModelError as exc:
+                logger.warning("Cannot publish remote-write source %s: %s", current.id, exc)
+
+    def _publish_relation(self, relation: ops.Relation, url: str | None) -> None:
+        """Update one source without letting its removal interrupt other consumers."""
+        if self._charm.unit.is_leader():
+            for key in LEGACY_METADATA_KEYS:
+                relation.data[self._charm.app].pop(key, None)
+        if url is None:
+            relation.data[self._charm.unit].pop("remote_write", None)
+        else:
+            relation.data[self._charm.unit]["remote_write"] = json.dumps({"url": url})
 
     def clear(self) -> None:
         """Clear published remote-write endpoint data from all relations."""
-        for relation in self._charm.model.relations.get("receive-remote-write", []):
-            if self._charm.unit.is_leader():
-                for key in LEGACY_METADATA_KEYS:
-                    relation.data[self._charm.app].pop(key, None)
-            relation.data[self._charm.unit].pop("remote_write", None)
+        self.publish(relation_urls={})

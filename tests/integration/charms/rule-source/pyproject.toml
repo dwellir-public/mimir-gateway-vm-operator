@@ -1,0 +1,5 @@
+[project]
+name = "gateway-lifecycle-source"
+version = "0.0.1"
+requires-python = ">=3.10"
+dependencies = ["ops==3.0.0"]
